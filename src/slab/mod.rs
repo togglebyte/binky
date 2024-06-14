@@ -53,9 +53,7 @@ impl<T> Slab<T> {
                     gen: key.gen(),
                 };
                 swap(&mut self.inner[key.index()], &mut entry);
-                let Entry::Vacant(next) = entry else {
-                    panic!("tried to replace vacant entry")
-                };
+                let Entry::Vacant(next) = entry else { panic!("tried to replace vacant entry") };
                 self.next_key = next;
                 key
             }
@@ -71,9 +69,7 @@ impl<T> Slab<T> {
         let mut entry = Entry::Vacant(self.next_key.take());
         swap(&mut self.inner[key.index()], &mut entry);
         self.next_key = Some(key.bump());
-        let Entry::Occupied { value, gen } = entry else {
-            panic!()
-        };
+        let Entry::Occupied { value, gen } = entry else { panic!() };
         if gen != key.gen() {
             panic!()
         }

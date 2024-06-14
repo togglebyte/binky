@@ -24,12 +24,13 @@ mod a {
             match msg {
                 binky::AgentMessage::Value { value, sender } => {
                     // eprintln!("{value}");
-                    agent.send(sender, value).await;
+                    agent.send(&sender, value).await;
                 }
                 binky::AgentMessage::Request { request, sender } => {
                     panic!("if you can read this, then things are actually quite good");
                     // let (a, b) = request.read::<(u32, u32)>().unwrap();
                 }
+                binky::AgentMessage::AgentRemoved(_) => todo!(),
             }
         }
     }
@@ -69,7 +70,7 @@ mod b {
         let Ok(remote) = agent.resolve_remote(bridge, AddressA::A).await else { panic!() };
         // let Ok(local) = agent.resolve(AddressB::C).await else { panic!() };
 
-        let result: u32 = agent.request(remote, (1u32, 2u32)).await.unwrap();
+        let result: u32 = agent.request(&remote, (1u32, 2u32)).await.unwrap();
 
         // agent.send(local, "hello world".to_string()).await;
 
@@ -79,6 +80,7 @@ mod b {
                     eprintln!("{value}");
                 }
                 binky::AgentMessage::Request { request, sender } => todo!(),
+                binky::AgentMessage::AgentRemoved(_) => todo!(),
             }
         }
     }

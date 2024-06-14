@@ -33,12 +33,6 @@ pub(crate) enum RouterMessage {
         recipient: AgentKey,
         request: Request<Pending>,
     },
-    RemoteRequest {
-        response: Sender<Result<Box<[u8]>>>,
-    },
-    /// 
-    RemoteRequestResponse {
-    },
     /// Request a local address
     ResolveLocal {
         reply: Sender<Result<AgentKey>>,
@@ -71,6 +65,10 @@ pub(crate) enum RouterMessage {
     Callback {
         callback_id: u64,
         callback_value: CallbackValue,
+    },
+    Track {
+        tracker: AgentKey,
+        target: AgentKey,
     },
 }
 

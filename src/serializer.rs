@@ -17,7 +17,8 @@ impl Serializer {
         let bytes = match self {
             Self::Json => serde_json::to_vec(&value)?,
             Self::Postcard => postcard::to_stdvec(&value)?,
-        }.into_boxed_slice();
+        }
+        .into_boxed_slice();
         Ok(bytes)
     }
 
@@ -36,7 +37,7 @@ impl TryFrom<u8> for Serializer {
         let ser = match value {
             0 => Self::Json,
             1 => Self::Postcard,
-            byte => return Err(Error::InvalidSerializer(byte))
+            byte => return Err(Error::InvalidSerializer(byte)),
         };
         Ok(ser)
     }

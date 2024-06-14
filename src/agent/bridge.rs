@@ -28,6 +28,7 @@ impl BridgeAgent {
             super::AnyMessage::Value { .. }
             | super::AnyMessage::RemoteValue { .. }
             | super::AnyMessage::LocalRequest { .. } => todo!(),
+            super::AnyMessage::AgentRemoved(_) => todo!(),
         }
     }
 

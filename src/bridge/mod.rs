@@ -4,12 +4,11 @@ use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 
+pub(crate) use self::message::{ReaderMessage, WriterMessage};
+pub(crate) use self::net::connect;
 use crate::error::Result;
 use crate::router::RouterCtx;
 use crate::serializer::Serializer;
-
-pub(crate) use self::net::connect;
-pub(crate) use self::message::{WriterMessage, ReaderMessage};
 
 mod message;
 mod net;
@@ -64,7 +63,7 @@ where
 
 /// Implement the `Stream` trait for any type that should be used
 /// with the `Agent::connect` function to pass data to other `Router`s.
-pub trait Stream : Send + 'static {
+pub trait Stream: Send + 'static {
     /// Split the stream into a read / write half
     fn split(
         self,

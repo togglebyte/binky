@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::serializer::Serializer;
 
 /// A key for accessing a value in a Slab<T>
-#[derive(Copy, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Copy, Clone, PartialEq, Hash, Eq, Serialize, Deserialize)]
 #[repr(transparent)]
 pub(crate) struct Key(pub(super) u64);
 
@@ -17,7 +17,9 @@ pub(crate) struct RemoteKey(#[serde(with = "serde_bytes")] pub(crate) Box<[u8]>)
 
 impl RemoteKey {
     pub(crate) fn to_key(&self, serializer: Serializer) -> Key {
-        serializer.deserialize(&self.0).expect("a remote key can always be deserialized")
+        serializer
+            .deserialize(&self.0)
+            .expect("a remote key can always be deserialized")
     }
 }
 
@@ -69,7 +71,7 @@ impl From<Key> for u64 {
 }
 
 /// A key for an agent in a slab
-#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
 pub(crate) struct AgentKey(Key);
 
 impl Deref for AgentKey {
@@ -94,7 +96,7 @@ impl From<u64> for AgentKey {
 
 impl From<AgentKey> for u64 {
     fn from(key: AgentKey) -> Self {
-        key.0.0
+        key.0 .0
     }
 }
 
@@ -124,10 +126,9 @@ impl Deref for BridgeKey {
 
 impl From<BridgeKey> for u64 {
     fn from(key: BridgeKey) -> u64 {
-        key.0.0
+        key.0 .0
     }
 }
-
 
 impl From<u64> for BridgeKey {
     fn from(value: u64) -> Self {

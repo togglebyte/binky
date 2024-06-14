@@ -148,7 +148,7 @@ impl Frame {
     ///
     /// NOTE that reading will only grow the buffer after the currently allocated
     ///      buffer has been consumed. This means that if there is but one byte
-    ///      remaining, and the incoming message is two bytes, this still 
+    ///      remaining, and the incoming message is two bytes, this still
     ///      requires two reads to resize the buffer (since it's not possible
     ///      to know how much data is going to be read in total)
     pub(crate) fn empty() -> Self {
@@ -161,7 +161,10 @@ impl Frame {
     }
 
     /// Async read
-    pub(crate) async fn read_async<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> Result<usize> {
+    pub(crate) async fn read_async<T: AsyncRead + Unpin>(
+        &mut self,
+        reader: &mut T,
+    ) -> Result<usize> {
         let slice = self.available_slice_mut();
         let bytes_read = reader.read(slice).await?;
         self.inner_read(bytes_read)
@@ -285,8 +288,9 @@ impl Frame {
 
 #[cfg(test)]
 mod test {
-    use super::*;
     use std::io::{Read, Result as IoResult};
+
+    use super::*;
 
     struct PretendStream(Vec<u8>);
 
@@ -371,7 +375,7 @@ mod test {
         assert_eq!(f.read(&mut stream).unwrap(), BUF_SIZE); // read max buf size
 
         // Reading again casuses the resize as message has not yet been extracted
-        assert_eq!(f.read(&mut stream).unwrap(), 5);        // read the last five bytes
+        assert_eq!(f.read(&mut stream).unwrap(), 5); // read the last five bytes
         assert_eq!(f.buffer.len(), BUF_SIZE * 2);
 
         // By taking the message the buffer no longer need to occupy as much

@@ -31,6 +31,11 @@ impl RouterCtx {
         Ok(())
     }
 
+    pub(crate) fn send_sync(&self, message: RouterMessage) -> Result<()> {
+        self.tx.send(message)?;
+        Ok(())
+    }
+
     pub(crate) fn serialize(&self, data: &impl Serialize) -> Result<Box<[u8]>> {
         self.serializer.serialize(data)
     }
@@ -78,12 +83,34 @@ impl RouterCtx {
     pub(crate) async fn lookup_address(&self, address: Box<[u8]>) -> Result<AgentKey> {
         let (rx, msg) = RouterMessage::resolve_local(address);
         self.tx.send_async(msg).await?;
-        let agent_key = rx.recv_async().await??;
-        Ok(agent_key)
+        rx.recv_async().await?
     }
 
-    pub(crate) async fn callback(&self, callback_id: u64, callback_value: CallbackValue) -> Result<()> {
-        let msg = RouterMessage::Callback { callback_id, callback_value };
+    pub(crate) async fn callback(
+        &self,
+        callback_id: u64,
+        callback_value: CallbackValue,
+    ) -> Result<()> {
+        let msg = RouterMessage::Callback {
+            callback_id,
+            callback_value,
+        };
+        self.tx.send_async(msg).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn track(&self, sender: AgentKey, target: AgentKey) -> Result<()> {
+        let (tx, rx) = bounded(0);
+        let msg = RouterMessage::Track {
+            tracker: sender,
+            target,
+        };
+        self.tx.send_async(msg).await?;
+        Ok(rx.recv_async().await?)
+    }
+
+    pub(crate) async fn remove(&self, key: AgentKey) -> Result<()> {
+        let msg = RouterMessage::RemoveAgent(key);
         self.tx.send_async(msg).await?;
         Ok(())
     }
@@ -107,6 +134,7 @@ impl AgentEntry {
 pub struct Router {
     agents: Slab<AgentEntry>,
     addresses: HashMap<Box<[u8]>, u64>,
+    tracked: HashMap<AgentKey, Vec<AgentKey>>,
     router_tx: Sender<RouterMessage>,
     router_rx: Receiver<RouterMessage>,
     serializer: Serializer,
@@ -121,6 +149,21 @@ impl Router {
         }
     }
 
+    async fn remove_agent(&mut self, key: AgentKey) {
+        let Some(agent) = self.agents.remove(key) else { return };
+
+        if let Some(bytes) = agent.address {
+            self.addresses.remove(&bytes);
+        }
+
+        if let Some(tracked) = self.tracked.remove(&key) {
+            for agent in tracked {
+                let Some(agent) = self.agents.get(agent) else { continue };
+                let _ = agent.tx.send_async(AnyMessage::AgentRemoved(key)).await;
+            }
+        }
+    }
+
     /// Create a new instance of a message router:
     /// ```
     /// use binky::Router;
@@ -131,6 +174,7 @@ impl Router {
         Self {
             agents: Slab::new(),
             addresses: HashMap::default(),
+            tracked: HashMap::default(),
             router_tx,
             router_rx,
             serializer: Serializer::Json,
@@ -305,7 +349,8 @@ impl Router {
 
                     bridge
                         .tx
-                        .send_async(AnyMessage::Bridge(WriterMessage::Value(value))).await;
+                        .send_async(AnyMessage::Bridge(WriterMessage::Value(value)))
+                        .await;
                 }
                 RouterMessage::IncomingRemoteValue(value) => {
                     // TODO
@@ -342,9 +387,7 @@ impl Router {
                         })
                         .await
                     {
-                        let AnyMessage::LocalRequest { request, .. } = e.0 else {
-                            unreachable!()
-                        };
+                        let AnyMessage::LocalRequest { request, .. } = e.0 else { unreachable!() };
                         request.reply(Err(Error::AddressNotFound)).await;
                     }
                 }
@@ -354,28 +397,6 @@ impl Router {
                         .send_async(serializer.ok_or(Error::AddressNotFound))
                         .await;
                 }
-                //RouterMessage::Request {
-                //    sender,
-                //    recipient,
-                //    body: request,
-                //} => match recipient {
-                //    Address::Local(key) => {
-                //        let Some(recipient) = self.agents.get(key) else {
-                //            panic!("panic for now")
-                //        };
-                //        recipient
-                //            .tx
-                //            .send_async(AnyMessage::Request {
-                //                sender: Address::Local(sender),
-                //                request,
-                //            })
-                //            .await;
-                //    }
-                //    Address::Remote {
-                //        local_bridge_key,
-                //        remote_address,
-                //    } => {}
-                //},
                 RouterMessage::Shutdown => break,
                 RouterMessage::ResolveLocal { reply, address } => {
                     let key = self
@@ -404,15 +425,18 @@ impl Router {
                     };
                     bridge.tx.send_async(AnyMessage::Bridge(writer_msg)).await;
                 }
-                RouterMessage::RespondResolveRemote { callback, address, writer } => {
-                    let Some(bridge) = self.agents.get(writer) else { continue; };
+                RouterMessage::RespondResolveRemote {
+                    callback,
+                    address,
+                    writer,
+                } => {
+                    let Some(bridge) = self.agents.get(writer) else {
+                        continue;
+                    };
 
                     let address = bridge.serialize(&address).map(RemoteKey);
-                    
-                    let writer_msg = WriterMessage::AddressResponse {
-                        callback,
-                        address,
-                    };
+
+                    let writer_msg = WriterMessage::AddressResponse { callback, address };
                     bridge.tx.send_async(AnyMessage::Bridge(writer_msg)).await;
                 }
                 RouterMessage::NewAgent {
@@ -425,25 +449,20 @@ impl Router {
                     let _ = reply.send_async(agent).await;
                 }
                 RouterMessage::RemoveAgent(key) => {
-                    let Some(agent) = self.agents.remove(key) else {
-                        continue;
-                    };
-                    if let Some(bytes) = agent.address {
-                        self.addresses.remove(&bytes);
-                    }
+                    self.remove_agent(key).await;
                 }
-                RouterMessage::Callback { callback_id, callback_value } => {
+                RouterMessage::Callback {
+                    callback_id,
+                    callback_value,
+                } => {
                     let Some(cb) = self.callbacks.remove(callback_id) else { continue };
                     match (cb, callback_value) {
                         (Callback::Resolve(tx), CallbackValue::Resolve(value)) => {
                             tx.send_async(value).await;
                         }
                     }
-                    // match (callback
                 }
-                RouterMessage::RemoteRequest { response } => {
-                }
-                RouterMessage::RemoteRequestResponse {  } => todo!(),
+                RouterMessage::Track { tracker, target } => {}
             }
         }
         self
@@ -483,7 +502,7 @@ mod test {
         tokio::spawn(router.run());
 
         let recipient = a.resolve(Address::B).await.unwrap();
-        a.send(recipient, "hello".to_string()).await;
+        a.send(&recipient, "hello".to_string()).await;
 
         let AgentMessage::Value { value, sender } = b.recv::<String>().await.unwrap() else {
             panic!()
@@ -524,9 +543,7 @@ mod test {
         tokio::spawn(async move {
             a.remove_agent(a.key()).await;
             use crate::address::Address as A;
-            let A::Local(b_key) = a.resolve(Address::B).await.unwrap() else {
-                panic!()
-            };
+            let A::Local(b_key) = a.resolve(Address::B).await.unwrap() else { panic!() };
             a.remove_agent(b_key).await;
             a.shutdown().await;
         });
@@ -545,7 +562,7 @@ mod test {
 
         let handle = tokio::spawn(async move {
             let recipient = adder.resolve(Address::B).await.unwrap();
-            let response = adder.request::<u8>(recipient, (1u8, 2u8)).await;
+            let response = adder.request::<u8>(&recipient, (1u8, 2u8)).await;
             assert_eq!(response.unwrap(), 3);
         });
 
@@ -555,5 +572,25 @@ mod test {
         let request = request.read::<(u8, u8)>().unwrap();
         let (a, b) = *request;
         request.reply(a + b).await;
+    }
+
+    #[tokio::test]
+    async fn track_agent() {
+        let mut router = Router::new();
+        let mut a = router.agent(Address::A);
+        let mut b = router.agent(Address::B);
+
+        let router = tokio::spawn(router.run());
+
+        // Agent A is waiting for Agent B to shut down
+        let handle = tokio::spawn(async move {
+            let address = a.resolve(Address::B).await.unwrap();
+            a.track(&address).await.unwrap();
+
+            let Ok(AgentMessage::AgentRemoved(addr)) = a.recv::<()>().await else { panic!() };
+            assert_eq!(addr, address);
+        });
+
+        b.remove_self().await;
     }
 }

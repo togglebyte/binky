@@ -10,12 +10,12 @@ use crate::value::AnyValue;
 
 #[derive(Debug)]
 pub enum Callback {
-    Resolve(Sender<Result<RemoteKey>>)
+    Resolve(Sender<Result<RemoteKey>>),
 }
 
 #[derive(Debug)]
 pub enum CallbackValue {
-    Resolve(Result<RemoteKey>)
+    Resolve(Result<RemoteKey>),
 }
 
 impl From<Result<RemoteKey>> for CallbackValue {

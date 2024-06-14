@@ -10,6 +10,7 @@ use crate::bridge::{ReaderMessage, WriterMessage};
 use crate::error::{Error, Result};
 use crate::request::{Pending, Request, Serializable};
 use crate::serializer::Serializer;
+use crate::slab::AgentKey;
 use crate::value::{AnyValue, Initial, RemoteVal};
 
 mod bridge;
@@ -26,13 +27,12 @@ pub(crate) enum AnyMessage {
     },
     /// This value is sent to a bridge agent and should be ignored
     /// by regular agents
-    Bridge(WriterMessage), // RemoteVal<Initial>),
+    Bridge(WriterMessage),
     LocalRequest {
         request: Request<Pending>,
         sender: Address,
     },
-    //RemoteRequest {
-    //},
+    AgentRemoved(AgentKey),
 }
 
 impl AnyMessage {
@@ -55,19 +55,30 @@ impl AnyMessage {
             AnyMessage::Bridge(_) => {
                 unreachable!("this should be handled directly by the bridge")
             }
-            //AnyMessage::Value {
-            //    value: ValueKind::Binary(data),
-            //    sender,
-            //} => match serializer.deserialize(data) {
-            //    Ok(val) => Ok(AgentMessage::Value(val, sender)),
-            //    Err(_) => Err(Error::InvalidValueType),
-            //},
             AnyMessage::LocalRequest { request, sender } => {
                 Ok(AgentMessage::Request { request, sender })
-            } //AnyMessage::RemoteRequest { request, sender } => Ok(AgentMessage::Request {
-              //    request: request.serializable(serializer),
-              //    sender,
-              //}),
+            }
+            AnyMessage::AgentRemoved(key) => Ok(AgentMessage::AgentRemoved(Address::Local(key))),
+        }
+    }
+
+    fn to_local_agent_message<T: 'static>(self) -> Result<AgentMessage<T>> {
+        match self {
+            AnyMessage::Value { value, sender } => match value.downcast::<T>() {
+                Ok(val) => Ok(AgentMessage::Value {
+                    value: *val,
+                    sender,
+                }),
+                Err(_) => Err(Error::InvalidValueType),
+            },
+            AnyMessage::RemoteValue { value, sender } => Err(Error::RemoteActionOnLocal),
+            AnyMessage::Bridge(_) => {
+                unreachable!("this should be handled directly by the bridge")
+            }
+            AnyMessage::LocalRequest { request, sender } => {
+                Ok(AgentMessage::Request { request, sender })
+            }
+            AnyMessage::AgentRemoved(key) => Ok(AgentMessage::AgentRemoved(Address::Local(key))),
         }
     }
 }
@@ -85,6 +96,7 @@ impl AnyMessage {
 ///             let (a, b) = *request;
 ///             request.reply(a + b).await;
 ///         }
+///         AgentMessage::AgentRemoved(key) => {}
 ///     }
 /// }
 /// # }
@@ -105,4 +117,6 @@ pub enum AgentMessage<T> {
         /// The sender of the request
         sender: Address,
     },
+    /// An agent with a given address was removed
+    AgentRemoved(Address),
 }
