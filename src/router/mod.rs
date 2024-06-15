@@ -338,7 +338,7 @@ impl Router {
                         })
                         .await
                     {
-                        panic!("add an agent_remove function to deal with this");
+                        self.remove_agent(recipient);
                     }
                 }
                 RouterMessage::OutgoingRemoteValue(value) => {
