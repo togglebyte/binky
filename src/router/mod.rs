@@ -8,16 +8,18 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 pub(crate) use self::message::RouterMessage;
+pub(crate) use self::session::{Expiration, Session};
 use crate::address::Address;
 use crate::agent::{AnyMessage, BridgeAgent};
 use crate::bridge::{Bridge, Listener, ReaderMessage, WriterMessage};
 use crate::error::{Error, Result};
 use crate::request::{Callback, CallbackValue};
 use crate::serializer::Serializer;
-use crate::slab::{AgentKey, RemoteKey, Slab};
+use crate::slab::{AgentKey, BaseKey, RemoteKey, Slab};
 use crate::{Agent, Stream};
 
 mod message;
+mod session;
 
 #[derive(Debug, Clone)]
 pub(crate) struct RouterCtx {
@@ -150,7 +152,7 @@ impl Router {
     }
 
     async fn remove_agent(&mut self, key: AgentKey) {
-        let Some(agent) = self.agents.remove(key) else { return };
+        let Some(agent) = self.agents.remove(key.into()) else { return };
 
         if let Some(bytes) = agent.address {
             self.addresses.remove(&bytes);
@@ -158,7 +160,7 @@ impl Router {
 
         if let Some(tracked) = self.tracked.remove(&key) {
             for agent in tracked {
-                let Some(agent) = self.agents.get(agent) else { continue };
+                let Some(agent) = self.agents.get(agent.into()) else { continue };
                 let _ = agent.tx.send_async(AnyMessage::AgentRemoved(key)).await;
             }
         }
@@ -208,7 +210,7 @@ impl Router {
 
         let key = self.agents.insert(entry);
         if let Some(address) = address {
-            self.addresses.insert(address, key.into());
+            self.addresses.insert(address, key.consume());
         }
 
         Agent::new(key.into(), self.ctx(), rx, self.serializer)
@@ -325,7 +327,7 @@ impl Router {
                     value,
                     sender,
                 } => {
-                    let Some(agent) = self.agents.get(recipient) else {
+                    let Some(agent) = self.agents.get(recipient.into()) else {
                         continue;
                     };
                     // If this fails it means the channel was closed and
@@ -343,7 +345,7 @@ impl Router {
                 }
                 RouterMessage::OutgoingRemoteValue(value) => {
                     let bridge = value.local_bridge_key;
-                    let Some(bridge) = self.agents.get(bridge) else {
+                    let Some(bridge) = self.agents.get(bridge.into()) else {
                         continue;
                     };
 
@@ -356,7 +358,7 @@ impl Router {
                     // TODO
                     // if the agent isn't found reply with a NotFound error
                     let agent_key = value.recipient.to_key(self.serializer);
-                    let Some(agent) = self.agents.get(agent_key) else {
+                    let Some(agent) = self.agents.get(agent_key.into()) else {
                         continue;
                     };
 
@@ -374,7 +376,7 @@ impl Router {
                     recipient,
                     request,
                 } => {
-                    let Some(recipient) = self.agents.get(recipient) else {
+                    let Some(recipient) = self.agents.get(recipient.into()) else {
                         request.reply(Err(Error::AddressNotFound)).await;
                         continue;
                     };
@@ -392,6 +394,7 @@ impl Router {
                     }
                 }
                 RouterMessage::GetSerializer { key, reply } => {
+                    let key: BaseKey = key.into();
                     let serializer = self.agents.get(key).map(|entry| entry.serializer);
                     reply
                         .send_async(serializer.ok_or(Error::AddressNotFound))
@@ -412,7 +415,7 @@ impl Router {
                     address,
                     bridge,
                 } => {
-                    let Some(bridge) = self.agents.get(bridge) else {
+                    let Some(bridge) = self.agents.get(bridge.into()) else {
                         reply.send_async(Err(Error::AddressNotFound)).await;
                         continue;
                     };
@@ -420,7 +423,7 @@ impl Router {
                     let callback = self.callbacks.insert(callback);
 
                     let writer_msg = WriterMessage::AddressRequest {
-                        callback: callback.into(),
+                        callback: callback.consume(),
                         address,
                     };
                     bridge.tx.send_async(AnyMessage::Bridge(writer_msg)).await;
@@ -430,7 +433,7 @@ impl Router {
                     address,
                     writer,
                 } => {
-                    let Some(bridge) = self.agents.get(writer) else {
+                    let Some(bridge) = self.agents.get(writer.into()) else {
                         continue;
                     };
 
@@ -455,7 +458,8 @@ impl Router {
                     callback_id,
                     callback_value,
                 } => {
-                    let Some(cb) = self.callbacks.remove(callback_id) else { continue };
+                    let callback_key: BaseKey = callback_id.into();
+                    let Some(cb) = self.callbacks.remove(callback_key) else { continue };
                     match (cb, callback_value) {
                         (Callback::Resolve(tx), CallbackValue::Resolve(value)) => {
                             tx.send_async(value).await;

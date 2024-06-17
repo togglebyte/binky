@@ -274,7 +274,7 @@ impl Agent {
         bridge: Address,
         address: impl Serialize,
     ) -> Result<Address> {
-        let bridge = match bridge {
+        let bridge: BridgeKey = match bridge {
             Address::Local(bridge) => bridge.into(),
             Address::Remote { .. } => panic!("can not use a remote address as the bridge"),
         };

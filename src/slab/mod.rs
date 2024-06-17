@@ -4,14 +4,14 @@ use std::mem::swap;
 use serde::{Deserialize, Serialize};
 
 use self::keys::Key;
-pub(crate) use self::keys::{AgentKey, BridgeKey, RemoteKey};
+pub(crate) use self::keys::{AgentKey, BridgeKey, RemoteKey, SessionKey, BaseKey};
 
 mod keys;
 
 #[derive(Debug)]
 enum Entry<T> {
     Occupied { value: T, gen: u16 },
-    Vacant(Option<Key>),
+    Vacant(Option<BaseKey>),
 }
 
 impl<T> Entry<T> {
@@ -26,7 +26,7 @@ impl<T> Entry<T> {
 #[derive(Debug)]
 pub(crate) struct Slab<T> {
     inner: Vec<Entry<T>>,
-    next_key: Option<Key>,
+    next_key: Option<BaseKey>,
 }
 
 impl<T> Slab<T> {
@@ -37,10 +37,10 @@ impl<T> Slab<T> {
         }
     }
 
-    pub(crate) fn insert(&mut self, value: T) -> Key {
+    pub(crate) fn insert(&mut self, value: T) -> BaseKey {
         match self.next_key.take() {
             None => {
-                let key = Key(self.inner.len() as u64);
+                let key = BaseKey::new(self.inner.len() as u64);
                 self.inner.push(Entry::Occupied {
                     value,
                     gen: key.gen(),
@@ -60,8 +60,7 @@ impl<T> Slab<T> {
         }
     }
 
-    pub(crate) fn remove(&mut self, key: impl Into<Key>) -> Option<T> {
-        let key = key.into();
+    pub(crate) fn remove(&mut self, key: BaseKey) -> Option<T> {
         if key.index() >= self.inner.len() {
             return None;
         }
@@ -76,15 +75,15 @@ impl<T> Slab<T> {
         Some(value)
     }
 
-    pub(crate) fn get(&self, key: impl Into<Key>) -> Option<&T> {
-        let key = key.into();
+    pub(crate) fn get(&self, key: BaseKey) -> Option<&T> {
+        let key: BaseKey = key.into();
         self.inner.get(key.index()).and_then(|entry| match entry {
             Entry::Occupied { value, gen } if *gen == key.gen() => Some(value),
             _ => None,
         })
     }
 
-    pub(crate) fn get_mut(&mut self, key: Key) -> Option<&mut T> {
+    pub(crate) fn get_mut<K>(&mut self, key: Key<K>) -> Option<&mut T> {
         self.inner
             .get_mut(key.index())
             .and_then(|entry| match entry {
@@ -119,7 +118,7 @@ mod test {
         let k2 = slab.insert(2);
 
         assert_eq!(k1, Key::ZERO);
-        assert_eq!(k2, Key(1));
+        assert_eq!(k2, BaseKey::new(1));
     }
 
     #[test]

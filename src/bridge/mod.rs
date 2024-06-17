@@ -7,7 +7,7 @@ use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 pub(crate) use self::message::{ReaderMessage, WriterMessage};
 pub(crate) use self::net::connect;
 use crate::error::Result;
-use crate::router::RouterCtx;
+use crate::router::{Expiration, RouterCtx, Session};
 use crate::serializer::Serializer;
 
 mod message;
@@ -38,23 +38,40 @@ where
                 continue;
             }
 
+            // TODO
+            // * Create a session
+            // * Send session to router
+            // * Writing messages to a session rather than a writer directly
+
             // TODO negotiate heartbeat (see Agent::connect for the same comment)
             // TODO read capacity or configure this via the server?
 
-            let agent = self
+            let session_agent = self
                 .router_ctx
                 .new_bridge_agent::<()>(None, None, self.router_ctx.serializer())
-                .await
-                .unwrap(); // TODO: unwrap, what can be done here? log and move on?
+                .await?;
+
+            let writer_agent = self
+                .router_ctx
+                .new_bridge_agent::<()>(None, None, self.router_ctx.serializer())
+                .await?;
+
+            session_agent.track(&writer_agent.address()).await;
 
             tokio::spawn(net::read(
                 self.router_ctx.clone(),
                 reader,
                 self.heartbeat,
-                agent.key(),
+                session_agent.key(),
             ));
 
-            tokio::spawn(net::write(writer, agent));
+            // TODO
+            // Expiration should be configured as part of the
+            // connection setup. For now, it's hard coded to five minutes
+            let expiration = Expiration::after(Duration::from_secs(60 * 5));
+            let session = Session::new(expiration, session_agent);
+
+            tokio::spawn(net::write(writer, writer_agent));
         }
 
         Ok(())

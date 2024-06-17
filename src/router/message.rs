@@ -99,7 +99,7 @@ impl RouterMessage {
     pub(crate) fn get_serializer(key: BridgeKey) -> (Receiver<Result<Serializer>>, Self) {
         let (tx, rx) = bounded(0);
         let msg = Self::GetSerializer {
-            key: key.into(),
+            key: key.consume(),
             reply: tx,
         };
         (rx, msg)
