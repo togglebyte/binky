@@ -1,96 +1,52 @@
-mod a {
-    use binky::{Agent, Router, TcpListener};
-    use serde::{Deserialize, Serialize};
+use binky::*;
+use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Serialize, Deserialize)]
-    pub enum AddressA {
-        A,
-        Server,
-    }
-
-    pub async fn run_a() {
-        let mut router = Router::new();
-        let listener = TcpListener::bind("127.0.0.1:8000").await.unwrap();
-        router.listen(listener, AddressA::Server);
-
-        let agent = router.agent(AddressA::A);
-        tokio::spawn(incoming_msg(agent));
-
-        router.run().await;
-    }
-
-    pub async fn incoming_msg(mut agent: Agent) {
-        while let Ok(msg) = agent.recv::<String>().await {
-            match msg {
-                binky::AgentMessage::Value { value, sender } => {
-                    // eprintln!("{value}");
-                    agent.send(&sender, value).await;
-                }
-                binky::AgentMessage::Request { request, sender } => {
-                    panic!("if you can read this, then things are actually quite good");
-                    // let (a, b) = request.read::<(u32, u32)>().unwrap();
-                }
-                binky::AgentMessage::AgentRemoved(_) => todo!(),
-            }
-        }
-    }
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+enum A {
+    Client,
+    Server,
 }
 
-mod b {
-    use binky::{Agent, Router, TcpStream};
-    use serde::{Deserialize, Serialize};
+async fn second() {
+    let mut router = Router::new();
+    let stream = TcpStream::connect("127.0.0.1:12345").await.unwrap();
+    let mut agent = router.agent("idontcare");
 
-    use crate::a::AddressA;
+    let router_task = tokio::spawn(router.run());
 
-    #[derive(Debug, Serialize, Deserialize)]
-    enum AddressB {
-        B,
-        C,
-        Connection,
-    }
+    let session = agent.connect(stream, A::Client, None).await;
 
-    pub async fn run_b() {
-        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-        let mut router = Router::new();
-        let stream = TcpStream::connect("127.0.0.1:8000").await.unwrap();
-        router.connect(stream, AddressB::Connection);
-        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    let bridge = agent.resolve(A::Client).await.unwrap();
+    let remote_addr = agent.resolve_remote(bridge, A::Server).await.unwrap();
 
-        let agent_b = router.agent(AddressB::B);
-        let agent_c = router.agent(AddressB::C);
-        tokio::spawn(outgoing_msg(agent_b));
-        tokio::spawn(crate::a::incoming_msg(agent_c));
+    // let payload = String::from("hello world");
+    // agent.send(&remote_addr, payload).await;
 
-        router.run().await;
-    }
+    router_task.await;
+}
 
-    async fn outgoing_msg(mut agent: Agent) {
-        let Ok(bridge) = agent.resolve(AddressB::Connection).await else { panic!() };
+// NOTE this is the trouble maker
+async fn first() {
+    let mut router = Router::new();
+    let listener = TcpListener::bind("127.0.0.1:12345").await.unwrap();
+    router.listen(listener);
 
-        let Ok(remote) = agent.resolve_remote(bridge, AddressA::A).await else { panic!() };
-        // let Ok(local) = agent.resolve(AddressB::C).await else { panic!() };
+    let mut agent = router.agent(A::Server);
+    let router_task = tokio::spawn(router.run());
 
-        let result: u32 = agent.request(&remote, (1u32, 2u32)).await.unwrap();
+    eprintln!("about to panic!");
+    let Ok(AgentMessage::Value { value: msg, sender }) = agent.recv::<String>().await else {
+        panic!("all is lost!")
+    };
+    eprintln!("{msg}");
+    panic!();
 
-        // agent.send(local, "hello world".to_string()).await;
-
-        while let Ok(msg) = agent.recv::<String>().await {
-            match msg {
-                binky::AgentMessage::Value { value, sender } => {
-                    eprintln!("{value}");
-                }
-                binky::AgentMessage::Request { request, sender } => todo!(),
-                binky::AgentMessage::AgentRemoved(_) => todo!(),
-            }
-        }
-    }
+    router_task.await.unwrap();
 }
 
 #[tokio::main]
 async fn main() {
-    let handle_a = tokio::spawn(a::run_a());
-    let handle_b = tokio::spawn(b::run_b());
-
-    handle_a.await;
-    handle_b.await;
+    let handle = tokio::spawn(first());
+    second().await;
+    handle.await;
 }

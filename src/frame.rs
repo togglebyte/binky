@@ -170,7 +170,9 @@ impl Frame {
         self.inner_read(bytes_read)
     }
 
+    // TODO add this back in if we ever make 
     /// Sync read
+    #[cfg(test)]
     pub(crate) fn read<T: std::io::Read>(&mut self, reader: &mut T) -> Result<usize> {
         let slice = self.available_slice_mut();
         let bytes_read = reader.read(slice)?;
@@ -189,18 +191,6 @@ impl Frame {
         }
 
         Ok(bytes_read)
-    }
-
-    fn extend(&mut self, bytes: &[u8]) -> usize {
-        // As long as there is room in the buffer, keep extending the slice
-        // until either:
-        // * All bytes are consumed
-        // * There is no more room in the buffer, and the buffer can not grow.
-        let slice = self.available_slice_mut();
-        let len = slice.len().min(bytes.len());
-        slice[..len].copy_from_slice(&bytes[..len]);
-        self.bytes_read += len;
-        len
     }
 
     /// Try to produce a message.

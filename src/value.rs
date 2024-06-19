@@ -2,9 +2,10 @@ use std::ops::Deref;
 
 use serde::{Deserialize, Serialize};
 
-use crate::address::Address;
+use crate::address::InternalAddress;
 use crate::serializer::Serializer;
 use crate::slab::{AgentKey, BridgeKey, RemoteKey};
+use crate::SessionKey;
 
 pub(crate) type AnyValue = Box<dyn std::any::Any + Send>;
 
@@ -23,7 +24,7 @@ impl<T> Deref for RemoteVal<T> {
 pub(crate) struct Initial {
     payload: Box<[u8]>,
     sender: AgentKey,
-    pub(crate) local_bridge_key: BridgeKey,
+    pub(crate) local_session_key: SessionKey,
     recipient: RemoteKey,
 }
 
@@ -31,13 +32,13 @@ impl RemoteVal<Initial> {
     pub(crate) fn new(
         payload: Box<[u8]>,
         sender: AgentKey,
-        local_bridge_key: BridgeKey,
+        local_session_key: SessionKey,
         recipient: RemoteKey,
     ) -> Self {
         Self(Initial {
             payload,
             sender,
-            local_bridge_key,
+            local_session_key,
             recipient,
         })
     }
@@ -69,7 +70,7 @@ pub(crate) struct Outgoing {
 #[derive(Debug)]
 pub(crate) struct Incoming {
     pub(crate) value: Box<[u8]>,
-    pub(crate) sender: Address,
+    pub(crate) sender: InternalAddress,
     /// Despite the key being a `RemoteKey`, this is a local key
     pub(crate) recipient: RemoteKey,
 }

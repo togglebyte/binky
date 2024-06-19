@@ -1,15 +1,15 @@
-use std::fmt::{self, Debug};
 
 use flume::{bounded, Receiver, Sender};
-use serde::{Deserialize, Serialize};
 
-use crate::address::Address;
+use crate::address::InternalAddress;
 use crate::error::Result;
 use crate::request::{CallbackValue, LocalResponse, Pending, Request};
 use crate::serializer::Serializer;
 use crate::slab::{AgentKey, BridgeKey, RemoteKey};
 use crate::value::{AnyValue, Incoming, Initial, RemoteVal};
-use crate::Agent;
+use crate::{Agent, SessionKey};
+
+use super::Session;
 
 pub(crate) enum RouterMessage {
     /// Send a value to a local agent
@@ -41,14 +41,14 @@ pub(crate) enum RouterMessage {
     /// Request a remote address
     ResolveRemote {
         reply: Sender<Result<RemoteKey>>,
-        bridge: BridgeKey,
+        session: SessionKey,
         address: Box<[u8]>,
     },
     /// Reader responds to writer
     RespondResolveRemote {
         callback: u64,
         address: Option<AgentKey>,
-        writer: BridgeKey,
+        writer: SessionKey,
     },
     /// Shutdown the router
     Shutdown,
@@ -70,6 +70,8 @@ pub(crate) enum RouterMessage {
         tracker: AgentKey,
         target: AgentKey,
     },
+    GetOrCreateSession(SessionKey, Sender<Session>),
+    CleanupSessions,
 }
 
 impl RouterMessage {
@@ -88,7 +90,7 @@ impl RouterMessage {
     }
 
     /// Create a message wrapping a Value message
-    pub(crate) fn incoming(value: Box<[u8]>, sender: Address, recipient: RemoteKey) -> Self {
+    pub(crate) fn incoming(value: Box<[u8]>, sender: InternalAddress, recipient: RemoteKey) -> Self {
         Self::IncomingRemoteValue(RemoteVal(Incoming {
             value,
             sender,
@@ -96,7 +98,7 @@ impl RouterMessage {
         }))
     }
 
-    pub(crate) fn get_serializer(key: BridgeKey) -> (Receiver<Result<Serializer>>, Self) {
+    pub(crate) fn get_serializer(key: SessionKey) -> (Receiver<Result<Serializer>>, Self) {
         let (tx, rx) = bounded(0);
         let msg = Self::GetSerializer {
             key: key.consume(),
@@ -137,15 +139,14 @@ impl RouterMessage {
 
     /// Resolve a remote address
     pub(crate) fn resolve_remote(
-        sender: AgentKey,
-        bridge: BridgeKey,
+        session: SessionKey,
         address: Box<[u8]>,
     ) -> (Receiver<Result<RemoteKey>>, Self) {
         let (tx, rx) = flume::bounded(0);
         let msg = RouterMessage::ResolveRemote {
             reply: tx,
+            session,
             address,
-            bridge,
         };
 
         (rx, msg)
@@ -155,7 +156,7 @@ impl RouterMessage {
     pub(crate) fn respond_resolve_remote(
         callback: u64,
         address: Option<AgentKey>,
-        writer: BridgeKey,
+        writer: SessionKey,
     ) -> Self {
         Self::RespondResolveRemote {
             callback,

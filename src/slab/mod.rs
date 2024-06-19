@@ -1,10 +1,10 @@
-use std::fmt::{self, Debug};
+use std::fmt::{Debug};
 use std::mem::swap;
 
-use serde::{Deserialize, Serialize};
 
 use self::keys::Key;
-pub(crate) use self::keys::{AgentKey, BridgeKey, RemoteKey, SessionKey, BaseKey};
+pub(crate) use self::keys::{AgentKey, BridgeKey, RemoteKey, BaseKey};
+pub use self::keys::SessionKey;
 
 mod keys;
 
@@ -15,6 +15,7 @@ enum Entry<T> {
 }
 
 impl<T> Entry<T> {
+    #[cfg(test)]
     fn is_occupied(&self) -> bool {
         match self {
             Entry::Occupied { .. } => true,
@@ -83,15 +84,16 @@ impl<T> Slab<T> {
         })
     }
 
-    pub(crate) fn get_mut<K>(&mut self, key: Key<K>) -> Option<&mut T> {
-        self.inner
-            .get_mut(key.index())
-            .and_then(|entry| match entry {
-                Entry::Occupied { value, gen } if *gen == key.gen() => Some(value),
-                _ => None,
-            })
-    }
+    // pub(crate) fn get_mut<K>(&mut self, key: Key<K>) -> Option<&mut T> {
+    //     self.inner
+    //         .get_mut(key.index())
+    //         .and_then(|entry| match entry {
+    //             Entry::Occupied { value, gen } if *gen == key.gen() => Some(value),
+    //             _ => None,
+    //         })
+    // }
 
+    #[cfg(test)]
     pub(crate) fn count(&self) -> usize {
         self.inner.iter().filter(|e| e.is_occupied()).count()
     }
@@ -127,14 +129,6 @@ mod test {
         let k1 = slab.insert(1);
 
         assert_eq!(*slab.get(k1).unwrap(), 1);
-    }
-
-    #[test]
-    fn get_mut() {
-        let mut slab = Slab::new();
-        let k1 = slab.insert(1);
-
-        assert_eq!(*slab.get_mut(k1).unwrap(), 1);
     }
 
     #[test]

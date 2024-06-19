@@ -24,9 +24,6 @@ impl From<Result<RemoteKey>> for CallbackValue {
     }
 }
 
-#[derive(Debug)]
-pub struct Serializable((), Serializer);
-
 pub struct LocalResponse(Receiver<Result<AnyValue>>);
 
 impl LocalResponse {

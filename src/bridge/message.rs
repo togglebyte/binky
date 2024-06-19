@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::slab::RemoteKey;
+use crate::slab::{BridgeKey, RemoteKey};
 use crate::value::{Initial, Outgoing, RemoteVal};
 
 /// Message deserialized by the reading half of a socket
@@ -28,4 +28,11 @@ pub(crate) enum WriterMessage {
         callback: u64,
         address: Option<RemoteKey>,
     },
+}
+
+pub(crate) enum BridgeMessage {
+    Writer(WriterMessage),
+    AgentRemoved(BridgeKey),
+    WriterReturned(BridgeKey),
+    SessionPing,
 }

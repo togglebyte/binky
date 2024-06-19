@@ -1,22 +1,20 @@
 #[deny(missing_docs)]
 use std::collections::HashMap;
-use std::ops::Deref;
-use std::time::Duration;
 
 use flume::{bounded, unbounded, Receiver, Sender};
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 pub(crate) use self::message::RouterMessage;
 pub(crate) use self::session::{Expiration, Session};
-use crate::address::Address;
+use crate::address::InternalAddress;
 use crate::agent::{AnyMessage, BridgeAgent};
-use crate::bridge::{Bridge, Listener, ReaderMessage, WriterMessage};
+use crate::bridge::{Bridge, BridgeMessage, Listener, WriterMessage};
 use crate::error::{Error, Result};
 use crate::request::{Callback, CallbackValue};
 use crate::serializer::Serializer;
-use crate::slab::{AgentKey, BaseKey, RemoteKey, Slab};
-use crate::{Agent, Stream};
+use crate::slab::{AgentKey, BaseKey, BridgeKey, RemoteKey, Slab};
+use crate::{Agent, SessionKey, Stream};
 
 mod message;
 mod session;
@@ -101,18 +99,34 @@ impl RouterCtx {
         Ok(())
     }
 
-    pub(crate) async fn track(&self, sender: AgentKey, target: AgentKey) -> Result<()> {
-        let (tx, rx) = bounded(0);
-        let msg = RouterMessage::Track {
-            tracker: sender,
-            target,
-        };
-        self.tx.send_async(msg).await?;
-        Ok(rx.recv_async().await?)
+    pub(crate) async fn track(&self, tracker: AgentKey, target: AgentKey) -> Result<()> {
+        let msg = RouterMessage::Track { tracker, target };
+        Ok(self.tx.send_async(msg).await?)
     }
 
     pub(crate) async fn remove(&self, key: AgentKey) -> Result<()> {
         let msg = RouterMessage::RemoveAgent(key);
+        self.tx.send_async(msg).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn get_or_create_session(&self, session_key: SessionKey) -> Result<Session> {
+        let (tx, rx) = flume::bounded(0);
+        let msg = RouterMessage::GetOrCreateSession(session_key, tx);
+        self.tx.send_async(msg).await?;
+
+        Ok(rx.recv_async().await?)
+    }
+
+    pub(crate) async fn session_track_writer(
+        &self,
+        session: SessionKey,
+        writer: BridgeKey,
+    ) -> Result<()> {
+        let msg = RouterMessage::Track {
+            tracker: session.into(),
+            target: writer.into(),
+        };
         self.tx.send_async(msg).await?;
         Ok(())
     }
@@ -136,7 +150,8 @@ impl AgentEntry {
 pub struct Router {
     agents: Slab<AgentEntry>,
     addresses: HashMap<Box<[u8]>, u64>,
-    tracked: HashMap<AgentKey, Vec<AgentKey>>,
+    tracked_by: HashMap<AgentKey, Vec<AgentKey>>,
+    sessions: HashMap<SessionKey, ()>,
     router_tx: Sender<RouterMessage>,
     router_rx: Receiver<RouterMessage>,
     serializer: Serializer,
@@ -152,13 +167,15 @@ impl Router {
     }
 
     async fn remove_agent(&mut self, key: AgentKey) {
+        eprintln!("removing: {key:?}");
         let Some(agent) = self.agents.remove(key.into()) else { return };
 
         if let Some(bytes) = agent.address {
             self.addresses.remove(&bytes);
         }
 
-        if let Some(tracked) = self.tracked.remove(&key) {
+        if let Some(tracked) = self.tracked_by.remove(&key) {
+            eprintln!("notify: {tracked:?}");
             for agent in tracked {
                 let Some(agent) = self.agents.get(agent.into()) else { continue };
                 let _ = agent.tx.send_async(AnyMessage::AgentRemoved(key)).await;
@@ -176,7 +193,8 @@ impl Router {
         Self {
             agents: Slab::new(),
             addresses: HashMap::default(),
-            tracked: HashMap::default(),
+            tracked_by: HashMap::default(),
+            sessions: HashMap::default(),
             router_tx,
             router_rx,
             serializer: Serializer::Json,
@@ -259,49 +277,17 @@ impl Router {
     /// use binky::{Router, TcpListener};
     /// use serde::{Deserialize, Serialize};
     ///
-    /// #[derive(Serialize, Deserialize)]
-    /// enum Address {
-    ///     Server,
-    /// }
-    ///
     /// # async fn async_run() {
     /// let mut router = Router::new();
     /// let listener = TcpListener::bind("127.0.0.1:8000").await.unwrap();
-    /// router.listen(listener, Address::Server);
+    /// router.listen(listener);
     /// router.run().await;
     /// # }
     /// ```
-    pub fn listen(&mut self, listener: impl Listener, address: impl Serialize + Send + 'static) {
+    pub fn listen(&mut self, listener: impl Listener) {
         let bridge = Bridge::new(listener, self.ctx(), None);
         // TODO should the handle be kept for when the router is shut down?
-        tokio::spawn(bridge.run(address));
-    }
-
-    /// Connect to a remote router.
-    /// ```no_run
-    /// use binky::{Router, TcpStream};
-    /// use serde::{Deserialize, Serialize};
-    ///
-    /// #[derive(Serialize, Deserialize)]
-    /// enum Address {
-    ///     Connection,
-    /// }
-    ///
-    /// # async fn async_run() {
-    /// let mut router = Router::new();
-    /// let stream = TcpStream::connect("127.0.0.1:8000").await.unwrap();
-    /// router.connect(stream, Address::Connection);
-    /// router.run().await;
-    /// # }
-    /// ```
-    pub fn connect(&mut self, stream: impl Stream, address: impl Serialize + Send + 'static) {
-        let heartbeat = None;
-        tokio::spawn(crate::bridge::connect(
-            stream,
-            self.ctx(),
-            heartbeat,
-            Some(address),
-        ));
+        tokio::spawn(bridge.run());
     }
 
     /// Start the router and run it to completion,
@@ -336,22 +322,24 @@ impl Router {
                         .tx
                         .send_async(AnyMessage::Value {
                             value,
-                            sender: Address::Local(sender),
+                            sender: InternalAddress::Local(sender),
                         })
                         .await
                     {
-                        self.remove_agent(recipient);
+                        self.remove_agent(recipient).await;
                     }
                 }
                 RouterMessage::OutgoingRemoteValue(value) => {
-                    let bridge = value.local_bridge_key;
-                    let Some(bridge) = self.agents.get(bridge.into()) else {
+                    let session = value.local_session_key;
+                    let Some(session) = self.agents.get(session.into()) else {
                         continue;
                     };
 
-                    bridge
+                    session
                         .tx
-                        .send_async(AnyMessage::Bridge(WriterMessage::Value(value)))
+                        .send_async(AnyMessage::Bridge(BridgeMessage::Writer(
+                            WriterMessage::Value(value),
+                        )))
                         .await;
                 }
                 RouterMessage::IncomingRemoteValue(value) => {
@@ -363,7 +351,9 @@ impl Router {
                     };
 
                     let incoming = value.0;
-                    agent
+
+                    // There is nothing to do if the agent was removed but ignore the result
+                    let _ = agent
                         .tx
                         .send_async(AnyMessage::RemoteValue {
                             value: incoming.value,
@@ -385,7 +375,7 @@ impl Router {
                         .tx
                         .send_async(AnyMessage::LocalRequest {
                             request,
-                            sender: Address::Local(sender),
+                            sender: InternalAddress::Local(sender),
                         })
                         .await
                     {
@@ -412,10 +402,10 @@ impl Router {
                 }
                 RouterMessage::ResolveRemote {
                     reply,
+                    session,
                     address,
-                    bridge,
                 } => {
-                    let Some(bridge) = self.agents.get(bridge.into()) else {
+                    let Some(session) = self.agents.get(session.into()) else {
                         reply.send_async(Err(Error::AddressNotFound)).await;
                         continue;
                     };
@@ -426,7 +416,10 @@ impl Router {
                         callback: callback.consume(),
                         address,
                     };
-                    bridge.tx.send_async(AnyMessage::Bridge(writer_msg)).await;
+                    session
+                        .tx
+                        .send_async(AnyMessage::Bridge(BridgeMessage::Writer(writer_msg)))
+                        .await;
                 }
                 RouterMessage::RespondResolveRemote {
                     callback,
@@ -440,7 +433,12 @@ impl Router {
                     let address = bridge.serialize(&address).map(RemoteKey);
 
                     let writer_msg = WriterMessage::AddressResponse { callback, address };
-                    bridge.tx.send_async(AnyMessage::Bridge(writer_msg)).await;
+
+                    // If the rx end is closed there is nothing we can do here
+                    let _ = bridge
+                        .tx
+                        .send_async(AnyMessage::Bridge(BridgeMessage::Writer(writer_msg)))
+                        .await;
                 }
                 RouterMessage::NewAgent {
                     reply,
@@ -462,11 +460,41 @@ impl Router {
                     let Some(cb) = self.callbacks.remove(callback_key) else { continue };
                     match (cb, callback_value) {
                         (Callback::Resolve(tx), CallbackValue::Resolve(value)) => {
-                            tx.send_async(value).await;
+                            // If the receiving end is removed there is nothing to do here
+                            let _ = tx.send_async(value).await;
                         }
                     }
                 }
-                RouterMessage::Track { tracker, target } => {}
+                RouterMessage::Track { tracker, target } => {
+                    eprintln!("router tracking for {tracker:?} to track {target:?}");
+                    let targets = self.tracked_by.entry(target).or_default();
+                    targets.push(tracker);
+                }
+                RouterMessage::GetOrCreateSession(key, tx) => match self.agents.get(key.into()) {
+                    Some(session) => {}
+                    None => {}
+                },
+                RouterMessage::CleanupSessions => {
+                    let mut removed_agents = vec![];
+                    for key in self.sessions.keys().copied() {
+                        match self.agents.get(key.into()) {
+                            Some(agent) => {
+                                if let Err(_e) = agent
+                                    .tx
+                                    .send_async(AnyMessage::Bridge(BridgeMessage::SessionPing))
+                                    .await
+                                {
+                                    removed_agents.push(key);
+                                }
+                            }
+                            None => removed_agents.push(key),
+                        }
+                    }
+
+                    for dead_session in removed_agents {
+                        self.remove_agent(dead_session.into()).await;
+                    }
+                }
             }
         }
         self
@@ -479,6 +507,7 @@ mod test {
 
     use super::*;
     use crate::agent::AgentMessage;
+    use crate::timeout;
 
     #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
     enum Address {
@@ -545,10 +574,10 @@ mod test {
         let b = router.agent(Address::B);
 
         tokio::spawn(async move {
-            a.remove_agent(a.key()).await;
+            a.remove_agent(&a.address()).await;
             use crate::address::Address as A;
-            let A::Local(b_key) = a.resolve(Address::B).await.unwrap() else { panic!() };
-            a.remove_agent(b_key).await;
+            let b_addr = a.resolve(Address::B).await.unwrap() else { panic!() };
+            a.remove_agent(&b_addr).await;
             a.shutdown().await;
         });
         let router = router.run().await;
@@ -582,19 +611,30 @@ mod test {
     async fn track_agent() {
         let mut router = Router::new();
         let mut a = router.agent(Address::A);
-        let mut b = router.agent(Address::B);
+        let b = router.agent(Address::B);
 
         let router = tokio::spawn(router.run());
 
         // Agent A is waiting for Agent B to shut down
-        let handle = tokio::spawn(async move {
-            let address = a.resolve(Address::B).await.unwrap();
+        let h1 = tokio::spawn(async move {
+            let address = a
+                .resolve_with_retry(Address::B, timeout().duration_ms(10).retries(10))
+                .await
+                .unwrap();
+
             a.track(&address).await.unwrap();
 
             let Ok(AgentMessage::AgentRemoved(addr)) = a.recv::<()>().await else { panic!() };
             assert_eq!(addr, address);
         });
 
-        b.remove_self().await;
+        let h2 = tokio::spawn(async move {
+            let now = std::time::Instant::now();
+            timeout().duration_ms(10).retries(1).sleep().await;
+            b.remove_self().await
+        });
+
+        h1.await.unwrap();
+        h2.await.unwrap();
     }
 }

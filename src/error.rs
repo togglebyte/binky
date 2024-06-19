@@ -1,5 +1,4 @@
 //! Errors
-use serde::Serialize;
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
@@ -56,13 +55,13 @@ pub enum Error {
 }
 
 impl<T> From<flume::SendError<T>> for Error {
-    fn from(value: flume::SendError<T>) -> Self {
+    fn from(_: flume::SendError<T>) -> Self {
         Self::Flume
     }
 }
 
 impl From<flume::RecvError> for Error {
-    fn from(value: flume::RecvError) -> Self {
+    fn from(_: flume::RecvError) -> Self {
         Self::Flume
     }
 }

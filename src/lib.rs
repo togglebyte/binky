@@ -1,11 +1,12 @@
 #![deny(missing_docs)]
 //! Binky is a message passing library
 
-mod address;
+pub(crate) mod address;
 mod agent;
 mod bridge;
 pub mod error;
 mod frame;
+mod queue;
 mod request;
 mod retry;
 mod router;
@@ -15,10 +16,10 @@ mod value;
 
 pub use address::Address;
 pub use agent::{Agent, AgentMessage};
-pub use bridge::Stream;
+pub use bridge::{Listener, Stream};
 pub use retry::{timeout, Timeout};
 pub use router::Router;
-
+pub use slab::SessionKey;
 // -----------------------------------------------------------------------------
 //   - Re-exports -
 // -----------------------------------------------------------------------------

@@ -74,6 +74,11 @@ impl Timeout {
         self
     }
 
+    /// The sleep duration in milliseconds
+    pub fn duration_ms(self, millis: u64) -> Self {
+        self.duration(Duration::from_millis(millis))
+    }
+
     /// Linearly increment the duration by adding `add` after each sleep.
     pub fn linear(mut self, duration: Duration, add: Duration) -> Self {
         self.sleep = Sleep::Linear(duration, add);
@@ -112,12 +117,6 @@ pub enum Sleep {
     Duration(Duration),
     Linear(Duration, Duration),
     Exponential(Duration),
-}
-
-pub struct RetryBuilder {
-    retries: RetryCount,
-    sleep: Sleep,
-    jitter: Option<Range<usize>>,
 }
 
 /// Create a retry strategy

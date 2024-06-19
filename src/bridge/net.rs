@@ -4,8 +4,9 @@ use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::sleep;
 
-use crate::address::Address;
-use crate::agent::{AgentMessage, AnyMessage, BridgeAgent};
+use super::BridgeMessage;
+use crate::address::InternalAddress;
+use crate::agent::BridgeAgent;
 use crate::bridge::message::ReaderMessage;
 use crate::bridge::WriterMessage;
 use crate::error::{Error, Result};
@@ -14,25 +15,48 @@ use crate::router::{RouterCtx, RouterMessage};
 use crate::serializer::Serializer;
 use crate::slab::BridgeKey;
 use crate::value::Outgoing;
-use crate::{Agent, Stream};
+use crate::{SessionKey, Stream};
 
 pub(crate) async fn connect<T: Serialize>(
     stream: impl Stream,
     router_ctx: RouterCtx,
     heartbeat: Option<Duration>,
     address: Option<T>,
-) -> Result<()> {
-    let (mut reader, writer) = stream.split();
+    session: Option<SessionKey>,
+) -> Result<SessionKey> {
+    let (mut reader, mut writer) = stream.split();
+
     let serializer: Serializer = reader.read_u8().await?.try_into()?;
+
+    let session_key = match session {
+        Some(session_key) => {
+            // Tell the receiving end that we have a session
+            writer.write_u8(1).await?;
+            writer.write_u64(session_key.into()).await?;
+
+            // If the server replies with `1` it means the session is still valid
+            if reader.read_u8().await? == 1 {
+                writer.write_u8(0).await?;
+                SessionKey::from(reader.read_u64().await?)
+            } else {
+                session_key
+            }
+        }
+        None => {
+            // Tell the receiving end that we don't have a session
+            writer.write_u8(0).await?;
+            SessionKey::from(reader.read_u64().await?)
+        }
+    }.into();
 
     let agent = router_ctx
         .new_bridge_agent::<T>(address, None, serializer)
         .await?;
 
-    tokio::spawn(read(router_ctx.clone(), reader, heartbeat, agent.key()));
+    tokio::spawn(read(router_ctx.clone(), reader, heartbeat, session_key));
     tokio::spawn(write(writer, agent));
 
-    Ok(())
+    Ok(session_key)
 }
 
 // -----------------------------------------------------------------------------
@@ -48,7 +72,7 @@ where
     W: AsyncWriteExt + Unpin,
 {
     async fn run(mut self) -> Result<()> {
-        while let Ok(msg) = self.agent.recv().await {
+        while let Ok(BridgeMessage::Writer(msg)) = self.agent.recv().await {
             match msg {
                 WriterMessage::Value(value) => {
                     let msg = value.next(self.agent.serializer());
@@ -79,10 +103,7 @@ where
     }
 }
 
-pub(crate) async fn write(
-    mut writer: impl AsyncWriteExt + Unpin,
-    mut agent: BridgeAgent,
-) -> Result<()> {
+pub(crate) async fn write(writer: impl AsyncWriteExt + Unpin, agent: BridgeAgent) -> Result<()> {
     Writer { writer, agent }.run().await
 }
 
@@ -93,7 +114,7 @@ pub(crate) async fn read(
     router_ctx: RouterCtx,
     mut reader: impl AsyncReadExt + Unpin,
     heartbeat: Option<Duration>,
-    writer: BridgeKey,
+    writer: SessionKey,
 ) {
     let mut frame = Frame::empty();
 
@@ -116,10 +137,10 @@ pub(crate) async fn read(
                                         let Ok(msg) = router_ctx.deserialize::<ReaderMessage>(bytes) else { continue };
                                         match msg {
                                             ReaderMessage::Value(Outgoing { value, recipient, sender, reply_serializer }) => {
-                                                let sender = Address::Remote {
-                                                    local_bridge_key: writer,
+                                                let sender = InternalAddress::Remote {
+                                                    local_session_key: writer,
                                                     remote_address: sender,
-                                                    remote_serializer: reply_serializer.try_into().unwrap(), // TODO: unrwap...
+                                                    remote_serializer: reply_serializer.try_into().expect("this is always created from a serializer"),
                                                 };
                                                 let msg = RouterMessage::incoming(value, sender, recipient);
                                                 router_ctx.send(msg).await;

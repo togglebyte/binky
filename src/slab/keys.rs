@@ -1,6 +1,4 @@
 use std::fmt::{self, Debug};
-use std::marker::PhantomData;
-use std::ops::Deref;
 
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +8,7 @@ use crate::serializer::Serializer;
 /// Only `AgentKey`s should be serialized and deserialized
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[repr(transparent)]
-pub(crate) struct RemoteKey(#[serde(with = "serde_bytes")] pub(crate) Box<[u8]>);
+pub struct RemoteKey(#[serde(with = "serde_bytes")] pub(crate) Box<[u8]>);
 
 impl RemoteKey {
     pub(crate) fn to_key(&self, serializer: Serializer) -> AgentKey {
@@ -22,13 +20,14 @@ impl RemoteKey {
 
 /// A key for accessing a value in a Slab<T>
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Serialize, Deserialize)]
-pub(crate) struct Key<T>(pub(super) u64, T);
+pub struct Key<T>(pub(super) u64, T);
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
 pub(crate) struct Base;
 pub(crate) type BaseKey = Key<Base>;
 
 impl Key<Base> {
+    #[cfg(test)]
     pub(super) const ZERO: Self = Self(0, Base);
 
     pub(crate) fn new(inner: u64) -> Self {
@@ -97,11 +96,15 @@ impl<T: Default> From<u64> for Key<T> {
     }
 }
 
-// /// A key for an agent in a slab
-// #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
-// pub(crate) struct AgentKey(Key);
+impl<T> From<Key<T>> for u64 {
+    fn from(value: Key<T>) -> Self {
+        value.0
+    }
+}
+
 #[derive(Debug, Default, Copy, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
-pub(crate) struct Agent;
+pub struct Agent;
+
 /// A key for an agent in a slab
 pub type AgentKey = Key<Agent>;
 
@@ -111,14 +114,22 @@ impl From<BaseKey> for AgentKey {
     }
 }
 
-// /// A key for a bridged connection (reader / writer pair) in a slab
-// #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
-// pub(crate) struct BridgeKey(Key);
+impl From<BridgeKey> for AgentKey {
+    fn from(value: BridgeKey) -> Self {
+        Key(value.0, Agent)
+    }
+}
+
+impl From<SessionKey> for AgentKey {
+    fn from(value: SessionKey) -> Self {
+        Key(value.0, Agent)
+    }
+}
 
 /// A key for a bridged connection (reader / writer pair) in a slab
 #[derive(Debug, Default, Copy, Clone, PartialEq, Hash, Eq)]
-pub(crate) struct Bridge;
-pub(crate) type BridgeKey = Key<Bridge>;
+pub struct Bridge;
+pub type BridgeKey = Key<Bridge>;
 
 impl From<Key<Agent>> for Key<Bridge> {
     fn from(value: Key<Agent>) -> Self {
@@ -126,32 +137,25 @@ impl From<Key<Agent>> for Key<Bridge> {
     }
 }
 
-// impl Deref for BridgeKey {
-//     type Target = Key;
-
-//     fn deref(&self) -> &Self::Target {
-//         &self.0
-//     }
-// }
-
-// impl From<BridgeKey> for u64 {
-//     fn from(key: BridgeKey) -> u64 {
-//         key.0 .0
-//     }
-// }
-
-// impl From<u64> for BridgeKey {
-//     fn from(value: u64) -> Self {
-//         Self(value.into())
-//     }
-// }
-
-// impl From<AgentKey> for BridgeKey {
-//     fn from(value: AgentKey) -> Self {
-//         Self(value.into())
-//     }
-// }
-
 #[derive(Debug, Default, Copy, Clone, PartialEq, Hash, Eq)]
-pub(crate) struct Session;
+pub struct Session;
+/// A key to a session in the router
 pub type SessionKey = Key<Session>;
+
+impl Key<Session> {
+    pub fn to_bytes(self) -> [u8; 8] {
+        self.0.to_be_bytes()
+    }
+}
+
+impl From<Key<Bridge>> for Key<Session> {
+    fn from(value: Key<Bridge>) -> Self {
+        Self(value.0, Session)
+    }
+}
+
+impl From<Key<Agent>> for Key<Session> {
+    fn from(value: Key<Agent>) -> Self {
+        Self(value.0, Session)
+    }
+}

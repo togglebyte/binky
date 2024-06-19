@@ -1,10 +1,10 @@
 use serde::Serialize;
 
-use crate::bridge::WriterMessage;
+use crate::address::InternalAddress;
+use crate::bridge::{BridgeMessage, WriterMessage};
 use crate::error::Result;
 use crate::serializer::Serializer;
 use crate::slab::BridgeKey;
-use crate::value::{Initial, RemoteVal};
 use crate::{Address, Agent};
 
 pub(crate) struct BridgeAgent(Agent);
@@ -18,24 +18,29 @@ impl BridgeAgent {
         self.0.key().into()
     }
 
-    //pub(crate) async fn recv(&self) -> Result<RemoteVal<Initial>> {
-    pub(crate) async fn recv(&self) -> Result<WriterMessage> {
-        match self.0.rx.recv_async().await? {
+    pub(crate) async fn recv(&self) -> Result<BridgeMessage> {
+        let msg = self.0.rx.recv_async().await?;
+        match msg {
             super::AnyMessage::Bridge(value) => Ok(value),
-            // TODO what should be done here? The
-            // bridge should perhaps just ignore agent
-            // messages? Maybe a log entry?
-            super::AnyMessage::Value { .. }
-            | super::AnyMessage::RemoteValue { .. }
-            | super::AnyMessage::LocalRequest { .. } => todo!(),
-            super::AnyMessage::AgentRemoved(_) => todo!(),
+            // TODO uwat should be done here?
+            // The bridge should perhaps just ignore
+            // agent messages? Maybe a log entry?
+            super::AnyMessage::RemoteValue { value, sender } => {
+                eprintln!("remote value");
+                panic!()
+            }
+            super::AnyMessage::Value { sender, .. } => {
+                eprintln!("value | sender: {sender:?}");
+                panic!()
+            }
+            super::AnyMessage::LocalRequest { .. } => todo!("local request"),
+            super::AnyMessage::AgentRemoved(key) => Ok(BridgeMessage::AgentRemoved(key.into())),
         }
     }
 
-    pub(crate) async fn send(&self, msg: WriterMessage, recipient: BridgeKey) -> Result<()> {
-        let address = Address::Local(recipient.consume().into());
+    pub(crate) async fn send(&self, recipient: BridgeKey, msg: BridgeMessage) -> Result<()> {
+        let address = InternalAddress::Local(recipient.consume().into()).into();
         self.0.send_local(&address, msg).await
-
     }
 
     pub(crate) fn serializer(&self) -> Serializer {
@@ -46,11 +51,12 @@ impl BridgeAgent {
         self.0.serializer.serialize(value)
     }
 
-    pub(crate) async fn track(&self, address: &Address) -> Result<()> {
-        self.0.track(address).await
+    pub(crate) async fn track(&self, key: BridgeKey) -> Result<()> {
+        let addr = InternalAddress::Local(key.into()).into();
+        self.0.track(&addr).await
     }
 
-    pub(crate) fn address(&self) -> Address {
-        self.0.address()
+    pub(crate) async fn remove_self(self) {
+        let _ = self.0.remove_self().await;
     }
 }
