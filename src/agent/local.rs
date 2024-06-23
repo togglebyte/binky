@@ -10,11 +10,12 @@ use crate::error::{Error, Result};
 use crate::retry::Timeout;
 use crate::router::{RouterCtx, RouterMessage};
 use crate::serializer::Serializer;
-use crate::slab::{AgentKey, BridgeKey};
+use crate::slab::AgentKey;
 use crate::value::{AnyValue, RemoteVal};
 use crate::{Address, SessionKey, Stream};
 
 /// Agent..
+#[derive(Debug)]
 pub struct Agent {
     key: AgentKey,
     router_ctx: RouterCtx,
@@ -143,7 +144,7 @@ impl Agent {
     pub async fn track(&self, address: &Address) -> Result<()> {
         match address.inner() {
             InternalAddress::Local(key) => self.router_ctx.track(self.key(), *key).await,
-            InternalAddress::Remote { .. } => Err(Error::LocalOnly),
+            &InternalAddress::Remote { local_session_key, .. } => self.router_ctx.track(self.key(), local_session_key.into()).await,
         }
     }
 
@@ -310,7 +311,7 @@ impl Agent {
     }
 
     /// Remove a local agent
-    pub async fn remove_agent(&self, addr: &Address) -> Result<()> {
+    pub async fn remove_agent(&self, addr: Address) -> Result<()> {
         match addr.inner() {
             InternalAddress::Local(key) => {
                 let msg = RouterMessage::remove_agent(*key);

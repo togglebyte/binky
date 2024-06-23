@@ -1,5 +1,5 @@
 use crate::serializer::Serializer;
-use crate::slab::{AgentKey, BridgeKey, RemoteKey};
+use crate::slab::{AgentKey, RemoteKey};
 use crate::SessionKey;
 
 #[derive(Debug, PartialEq, Clone)]

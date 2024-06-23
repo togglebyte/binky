@@ -236,6 +236,8 @@ impl Frame {
         Ok(Some(FrameOutput::Bytes(bytes)))
     }
 
+    // The only time this will return an empty slice
+    // is if the MAX_BUF_SIZE has been achieved and the buffer is full.
     fn available_slice_mut(&mut self) -> &mut [u8] {
         let slice = &mut self.buffer[self.bytes_read..];
         if slice.is_empty() && self.buffer.capacity() < MAX_BUF_SIZE {

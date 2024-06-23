@@ -3,10 +3,12 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 
-pub(crate) use self::message::{BridgeMessage, WriterMessage};
+pub(crate) use self::message::{SessionMessage, WriterMessage};
 pub(crate) use self::net::connect;
 use crate::error::Result;
+use crate::router::session::SessionNegotiation;
 use crate::router::{Expiration, RouterCtx, Session};
+use crate::slab::WriterKey;
 use crate::SessionKey;
 
 mod message;
@@ -30,6 +32,24 @@ where
         }
     }
 
+    async fn new_session(&self, writer_agent_key: WriterKey) -> Result<SessionKey> {
+        // ... create a new session agent
+        let session_agent = self
+            .router_ctx
+            .new_session_agent::<()>(None, None, self.router_ctx.serializer())
+            .await?;
+
+        // ... track the writer agent
+        session_agent.track(writer_agent_key).await;
+
+        // ... spawn a new session
+        let expiration = Expiration::after(Duration::from_secs(60 * 5));
+        let session = Session::new(expiration, session_agent, writer_agent_key, 100);
+        let key = session.key();
+        tokio::spawn(session.run());
+        Ok(key)
+    }
+
     pub(crate) async fn run(mut self) -> Result<()> {
         while let Ok((mut reader, mut writer)) = self.listener.accept().await {
             let serializer = self.router_ctx.serializer() as u8;
@@ -42,7 +62,7 @@ where
 
             let writer_agent = self
                 .router_ctx
-                .new_bridge_agent::<()>(None, None, self.router_ctx.serializer())
+                .new_writer_agent::<()>(None, None, self.router_ctx.serializer())
                 .await?;
 
             // -----------------------------------------------------------------------------
@@ -56,56 +76,42 @@ where
             // Expiration should be configured as part of the
             // connection setup. For now, it's hard coded to five minutes
             let expiration = Expiration::after(Duration::from_secs(60 * 5));
-            let session_key = match reader.read_u8().await? == 1 {
-                true => {
+
+            let session_negotiation = reader.read_u8().await?.into();
+            let session_key = match session_negotiation {
+                SessionNegotiation::HasExistingSession => {
+                    // Read the session key from the connection
                     let session_key = SessionKey::from(reader.read_u64().await?);
 
-                    // Flow:
-                    // 1. Check if session is active:
-                    //  -> yes all is well
-                    //  -> no, make new session and reply with a new session key
+                    // Check if the router has an agent with the session key
+                    let session_exists = self.router_ctx.session_exists(session_key).await;
 
-                    let session = self.router_ctx.get_or_create_session(session_key).await?;
-                    if session.key() == session_key {
-                        writer.write_u8(1).await?;
-                        // they are the same session, so no need to do anything but associate
-                        // the new writer with the given session
-                        self.router_ctx.session_track_writer(session.key(), writer_agent.key()).await;
-                        session_key
-                    } else {
-                        // they are **NOT** the same
-                        writer.write_u8(0).await?;
-
-                        let session_agent = self
-                            .router_ctx
-                            .new_bridge_agent::<()>(None, None, self.router_ctx.serializer())
-                            .await?;
-
-                        session_agent.track(writer_agent.key()).await;
-
-                        let raw_session_key = u64::from(session_agent.key()).to_be_bytes();
-                        writer.write_all(&raw_session_key).await?;
-                        let session = Session::new(expiration, session_agent, writer_agent.key(), 100);
-                        let key = session.key();
-                        tokio::spawn(session.run());
-                        key
+                    match session_exists {
+                        // If the session that was read from the connection exists then notify the
+                        // connection
+                        true => {
+                            writer
+                                .write_u8(SessionNegotiation::ValidSession as u8)
+                                .await?;
+                            session_key
+                        }
+                        // If the session is no longer valid then notify the connection and...
+                        false => {
+                            writer
+                                .write_u8(SessionNegotiation::InvalidSession as u8)
+                                .await?;
+                            let new_session_key = self.new_session(writer_agent.key()).await?;
+                            writer.write_u64(new_session_key.into()).await?;
+                            new_session_key
+                        }
                     }
                 }
-                false => {
-                    let session_agent = self
-                        .router_ctx
-                        .new_bridge_agent::<()>(None, None, self.router_ctx.serializer())
-                        .await?;
-
-                    session_agent.track(writer_agent.key()).await;
-
-                    let raw_session_key = u64::from(session_agent.key()).to_be_bytes();
-                    writer.write_all(&raw_session_key).await?;
-                    let session = Session::new(expiration, session_agent, writer_agent.key(), 100);
-                    let key = session.key();
-                    tokio::spawn(session.run());
-                    key
+                SessionNegotiation::RequestNewSession => {
+                    let new_session_key = self.new_session(writer_agent.key()).await?;
+                    writer.write_u64(new_session_key.into()).await?;
+                    new_session_key
                 }
+                _ => panic!("invalid session data"),
             };
 
             tokio::spawn(net::read(
@@ -113,6 +119,7 @@ where
                 reader,
                 self.heartbeat,
                 session_key,
+                writer_agent.key(),
             ));
 
             tokio::spawn(net::write(writer, writer_agent));
@@ -164,7 +171,7 @@ impl Stream for UnixStream {
 /// let (read, write) = listener.accept().await.unwrap();
 /// # }
 /// ```
-pub trait Listener: Unpin + Send + 'static {
+pub trait Listener: Unpin + Send  + Sync+ 'static {
     /// Accept and split incoming streams
     fn accept(
         &mut self,
@@ -183,7 +190,7 @@ impl Listener for TcpListener {
         impl AsyncReadExt + Unpin + Send + 'static,
         impl AsyncWriteExt + Unpin + Send + 'static,
     )> {
-        let (output, addr) = TcpListener::accept(self).await?;
+        let (output, _addr) = TcpListener::accept(self).await?;
         Ok(output.into_split())
     }
 }
@@ -195,7 +202,7 @@ impl Listener for UnixListener {
         impl AsyncReadExt + Unpin + Send + 'static,
         impl AsyncWriteExt + Unpin + Send + 'static,
     )> {
-        let (output, addr) = UnixListener::accept(self).await?;
+        let (output, _addr) = UnixListener::accept(self).await?;
         Ok(output.into_split())
     }
 }

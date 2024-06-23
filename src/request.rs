@@ -4,7 +4,6 @@ use flume::{Receiver, Sender};
 use serde::de::DeserializeOwned;
 
 use crate::error::{Error, Result};
-use crate::serializer::Serializer;
 use crate::slab::RemoteKey;
 use crate::value::AnyValue;
 

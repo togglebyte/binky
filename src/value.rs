@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::address::InternalAddress;
 use crate::serializer::Serializer;
-use crate::slab::{AgentKey, BridgeKey, RemoteKey};
+use crate::slab::{AgentKey, RemoteKey};
 use crate::SessionKey;
 
 pub(crate) type AnyValue = Box<dyn std::any::Any + Send>;
@@ -23,7 +23,7 @@ impl<T> Deref for RemoteVal<T> {
 #[derive(Debug)]
 pub(crate) struct Initial {
     payload: Box<[u8]>,
-    sender: AgentKey,
+    pub(crate) sender: AgentKey,
     pub(crate) local_session_key: SessionKey,
     recipient: RemoteKey,
 }

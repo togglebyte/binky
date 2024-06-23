@@ -5,7 +5,7 @@ use crate::address::InternalAddress;
 use crate::error::Result;
 use crate::request::{CallbackValue, LocalResponse, Pending, Request};
 use crate::serializer::Serializer;
-use crate::slab::{AgentKey, BridgeKey, RemoteKey};
+use crate::slab::{AgentKey, WriterKey, RemoteKey};
 use crate::value::{AnyValue, Incoming, Initial, RemoteVal};
 use crate::{Agent, SessionKey};
 
@@ -70,8 +70,9 @@ pub(crate) enum RouterMessage {
         tracker: AgentKey,
         target: AgentKey,
     },
-    GetOrCreateSession(SessionKey, Sender<Session>),
+    SessionExists(SessionKey, Sender<bool>),
     CleanupSessions,
+    RemoveWriter(WriterKey),
 }
 
 impl RouterMessage {

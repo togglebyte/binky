@@ -1,19 +1,20 @@
-
 use serde::de::DeserializeOwned;
 
-pub(crate) use self::bridge::BridgeAgent;
 pub use self::local::Agent;
+pub(crate) use self::session::SessionAgent;
+pub(crate) use self::writer::WriterAgent;
 use crate::address::InternalAddress;
-use crate::bridge::{BridgeMessage, WriterMessage};
+use crate::bridge::{SessionMessage, WriterMessage};
 use crate::error::{Error, Result};
 use crate::request::{Pending, Request};
 use crate::serializer::Serializer;
 use crate::slab::AgentKey;
-use crate::value::{AnyValue};
+use crate::value::AnyValue;
 use crate::Address;
 
-mod bridge;
 mod local;
+mod session;
+mod writer;
 
 pub(crate) enum AnyMessage {
     Value {
@@ -24,9 +25,10 @@ pub(crate) enum AnyMessage {
         value: Box<[u8]>,
         sender: InternalAddress,
     },
-    /// This value is sent to a bridge agent and should be ignored
-    /// by regular agents
-    Bridge(BridgeMessage),
+    /// This value is sent to a bridge agent and should be ignored by regular agents
+    Session(SessionMessage),
+    /// This value is sent to a writer agent and should be ignored by regular agents
+    Writer(WriterMessage),
     LocalRequest {
         request: Request<Pending>,
         sender: InternalAddress,
@@ -49,15 +51,24 @@ impl AnyMessage {
             },
             AnyMessage::RemoteValue { value, sender } => {
                 let value = serializer.deserialize(value)?;
-                Ok(AgentMessage::Value { value, sender: sender.into() })
+                Ok(AgentMessage::Value {
+                    value,
+                    sender: sender.into(),
+                })
             }
-            AnyMessage::Bridge(_) => {
-                unreachable!("this should be handled directly by the bridge")
+            AnyMessage::LocalRequest { request, sender } => Ok(AgentMessage::Request {
+                request,
+                sender: sender.into(),
+            }),
+            AnyMessage::AgentRemoved(key) => Ok(AgentMessage::AgentRemoved(
+                InternalAddress::Local(key).into(),
+            )),
+            AnyMessage::Session(_) => {
+                unreachable!("this should be handled directly by the session")
             }
-            AnyMessage::LocalRequest { request, sender } => {
-                Ok(AgentMessage::Request { request, sender: sender.into() })
+            AnyMessage::Writer(_) => {
+                unreachable!("this should be handled directly by the writer")
             }
-            AnyMessage::AgentRemoved(key) => Ok(AgentMessage::AgentRemoved(InternalAddress::Local(key).into())),
         }
     }
 
@@ -71,13 +82,19 @@ impl AnyMessage {
                 Err(_) => Err(Error::InvalidValueType),
             },
             AnyMessage::RemoteValue { .. } => Err(Error::RemoteActionOnLocal),
-            AnyMessage::Bridge(_) => {
-                unreachable!("this should be handled directly by the bridge")
+            AnyMessage::LocalRequest { request, sender } => Ok(AgentMessage::Request {
+                request,
+                sender: sender.into(),
+            }),
+            AnyMessage::AgentRemoved(key) => Ok(AgentMessage::AgentRemoved(
+                InternalAddress::Local(key).into(),
+            )),
+            AnyMessage::Session(_) => {
+                unreachable!("this should be handled directly by the session")
             }
-            AnyMessage::LocalRequest { request, sender } => {
-                Ok(AgentMessage::Request { request, sender: sender.into() })
+            AnyMessage::Writer(_) => {
+                unreachable!("this should be handled directly by the writer")
             }
-            AnyMessage::AgentRemoved(key) => Ok(AgentMessage::AgentRemoved(InternalAddress::Local(key).into())),
         }
     }
 }

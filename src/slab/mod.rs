@@ -1,10 +1,8 @@
-use std::fmt::{Debug};
+use std::fmt::Debug;
 use std::mem::swap;
 
-
-use self::keys::Key;
-pub(crate) use self::keys::{AgentKey, BridgeKey, RemoteKey, BaseKey};
 pub use self::keys::SessionKey;
+pub(crate) use self::keys::{AgentKey, BaseKey, WriterKey, RemoteKey};
 
 mod keys;
 

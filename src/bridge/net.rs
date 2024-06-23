@@ -3,17 +3,19 @@ use std::time::Duration;
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::sleep;
+use tracing::info;
 
-use super::BridgeMessage;
+use super::SessionMessage;
 use crate::address::InternalAddress;
-use crate::agent::BridgeAgent;
+use crate::agent::WriterAgent;
 use crate::bridge::message::ReaderMessage;
 use crate::bridge::WriterMessage;
 use crate::error::{Error, Result};
 use crate::frame::{Frame, FrameOutput};
+use crate::router::session::SessionNegotiation;
 use crate::router::{RouterCtx, RouterMessage};
 use crate::serializer::Serializer;
-use crate::slab::BridgeKey;
+use crate::slab::WriterKey;
 use crate::value::Outgoing;
 use crate::{SessionKey, Stream};
 
@@ -31,29 +33,31 @@ pub(crate) async fn connect<T: Serialize>(
     let session_key = match session {
         Some(session_key) => {
             // Tell the receiving end that we have a session
-            writer.write_u8(1).await?;
+            writer.write_u8(SessionNegotiation::HasExistingSession as u8).await?;
             writer.write_u64(session_key.into()).await?;
 
-            // If the server replies with `1` it means the session is still valid
-            if reader.read_u8().await? == 1 {
-                writer.write_u8(0).await?;
-                SessionKey::from(reader.read_u64().await?)
-            } else {
-                session_key
+            match SessionNegotiation::from(reader.read_u8().await?) {
+                SessionNegotiation::ValidSession => session_key,
+                SessionNegotiation::InvalidSession => SessionKey::from(reader.read_u64().await?),
+                _ => todo!("return an error about invalid session"),
             }
         }
         None => {
             // Tell the receiving end that we don't have a session
-            writer.write_u8(0).await?;
+            writer.write_u8(SessionNegotiation::RequestNewSession as u8).await?;
             SessionKey::from(reader.read_u64().await?)
         }
     }.into();
 
     let agent = router_ctx
-        .new_bridge_agent::<T>(address, None, serializer)
+        .new_writer_agent::<T>(address, None, serializer)
         .await?;
 
-    tokio::spawn(read(router_ctx.clone(), reader, heartbeat, session_key));
+    The session key is only needed here for reconnection.
+    Instead of always having a session, let's make the session a proxy for the writer
+    but only apply that to the server side, on the client side the reader gets the writer key
+
+    tokio::spawn(read(router_ctx.clone(), reader, heartbeat, session_key, agent.key()));
     tokio::spawn(write(writer, agent));
 
     Ok(session_key)
@@ -64,7 +68,7 @@ pub(crate) async fn connect<T: Serialize>(
 // -----------------------------------------------------------------------------
 struct Writer<W> {
     writer: W,
-    agent: BridgeAgent,
+    agent: WriterAgent,
 }
 
 impl<W> Writer<W>
@@ -72,7 +76,7 @@ where
     W: AsyncWriteExt + Unpin,
 {
     async fn run(mut self) -> Result<()> {
-        while let Ok(BridgeMessage::Writer(msg)) = self.agent.recv().await {
+        while let Ok(msg) = self.agent.recv().await {
             match msg {
                 WriterMessage::Value(value) => {
                     let msg = value.next(self.agent.serializer());
@@ -87,6 +91,7 @@ where
                     let msg = ReaderMessage::AddressResponse { callback, address };
                     self.write_msg(msg).await?;
                 }
+                WriterMessage::Shutdown => break,
             }
         }
 
@@ -103,7 +108,7 @@ where
     }
 }
 
-pub(crate) async fn write(writer: impl AsyncWriteExt + Unpin, agent: BridgeAgent) -> Result<()> {
+pub(crate) async fn write(writer: impl AsyncWriteExt + Unpin, agent: WriterAgent) -> Result<()> {
     Writer { writer, agent }.run().await
 }
 
@@ -114,7 +119,8 @@ pub(crate) async fn read(
     router_ctx: RouterCtx,
     mut reader: impl AsyncReadExt + Unpin,
     heartbeat: Option<Duration>,
-    writer: SessionKey,
+    session_key: SessionKey,
+    writer_key: WriterKey,
 ) {
     let mut frame = Frame::empty();
 
@@ -129,6 +135,7 @@ pub(crate) async fn read(
             _ = timeout => true,
             res = frame.read_async(&mut reader) => {
                 match res {
+                    Ok(0) => break 'read,
                     Ok(_byte_count) => 'msg: loop {
                         match frame.try_msg() {
                             Ok(Some(msg)) => {
@@ -138,7 +145,7 @@ pub(crate) async fn read(
                                         match msg {
                                             ReaderMessage::Value(Outgoing { value, recipient, sender, reply_serializer }) => {
                                                 let sender = InternalAddress::Remote {
-                                                    local_session_key: writer,
+                                                    local_session_key: session_key,
                                                     remote_address: sender,
                                                     remote_serializer: reply_serializer.try_into().expect("this is always created from a serializer"),
                                                 };
@@ -147,7 +154,7 @@ pub(crate) async fn read(
                                             }
                                             ReaderMessage::AddressRequest { callback, address } => {
                                                 let address = router_ctx.lookup_address(address).await.ok();
-                                                let msg = RouterMessage::respond_resolve_remote(callback, address, writer);
+                                                let msg = RouterMessage::respond_resolve_remote(callback, address, session_key);
                                                 router_ctx.send(msg).await;
                                             }
                                             ReaderMessage::AddressResponse { callback, address } => {
@@ -192,5 +199,7 @@ pub(crate) async fn read(
         }
     }
 
-    // panic!("tell the write half to go home");
+    info!("reader closed, removing writer");
+    router_ctx.remove_writer(writer_key).await;
+    // info!("here");
 }

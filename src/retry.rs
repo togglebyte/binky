@@ -122,7 +122,7 @@ pub enum Sleep {
 /// Create a retry strategy
 pub fn timeout() -> Timeout {
     Timeout {
-        retries: RetryCount::Never,
+        retries: RetryCount::Count(1),
         sleep: Sleep::NoSleep,
         jitter: None,
     }

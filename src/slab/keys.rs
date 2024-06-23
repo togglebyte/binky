@@ -41,8 +41,8 @@ impl From<AgentKey> for BaseKey {
     }
 }
 
-impl From<BridgeKey> for BaseKey {
-    fn from(value: BridgeKey) -> Self {
+impl From<WriterKey> for BaseKey {
+    fn from(value: WriterKey) -> Self {
         Key(value.0, Base)
     }
 }
@@ -84,9 +84,9 @@ impl<T> Key<T> {
     }
 }
 
-impl<T> Debug for Key<T> {
+impl<T: Debug> Debug for Key<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<{} | {}>", self.index(), self.gen())
+        write!(f, "<{:?} {} | {}>", self.1, self.index(), self.gen())
     }
 }
 
@@ -97,8 +97,8 @@ impl<T: Default> From<u64> for Key<T> {
 }
 
 impl<T> From<Key<T>> for u64 {
-    fn from(value: Key<T>) -> Self {
-        value.0
+    fn from(key: Key<T>) -> Self {
+        key.0
     }
 }
 
@@ -114,8 +114,8 @@ impl From<BaseKey> for AgentKey {
     }
 }
 
-impl From<BridgeKey> for AgentKey {
-    fn from(value: BridgeKey) -> Self {
+impl From<WriterKey> for AgentKey {
+    fn from(value: WriterKey) -> Self {
         Key(value.0, Agent)
     }
 }
@@ -128,12 +128,12 @@ impl From<SessionKey> for AgentKey {
 
 /// A key for a bridged connection (reader / writer pair) in a slab
 #[derive(Debug, Default, Copy, Clone, PartialEq, Hash, Eq)]
-pub struct Bridge;
-pub type BridgeKey = Key<Bridge>;
+pub struct Writer;
+pub type WriterKey = Key<Writer>;
 
-impl From<Key<Agent>> for Key<Bridge> {
+impl From<Key<Agent>> for Key<Writer> {
     fn from(value: Key<Agent>) -> Self {
-        Self(value.0, Bridge)
+        Self(value.0, Writer)
     }
 }
 
@@ -148,8 +148,8 @@ impl Key<Session> {
     }
 }
 
-impl From<Key<Bridge>> for Key<Session> {
-    fn from(value: Key<Bridge>) -> Self {
+impl From<Key<Writer>> for Key<Session> {
+    fn from(value: Key<Writer>) -> Self {
         Self(value.0, Session)
     }
 }
