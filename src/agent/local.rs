@@ -10,14 +10,14 @@ use crate::error::{Error, Result};
 use crate::retry::Timeout;
 use crate::router::{RouterCtx, RouterMessage};
 use crate::serializer::Serializer;
-use crate::slab::AgentKey;
+use crate::storage::{Key, KeyKind};
 use crate::value::{AnyValue, RemoteVal};
-use crate::{Address, SessionKey, Stream};
+use crate::{Address, Stream};
 
 /// Agent..
 #[derive(Debug)]
 pub struct Agent {
-    key: AgentKey,
+    key: Key,
     router_ctx: RouterCtx,
     pub(super) rx: Receiver<AnyMessage>,
     // This is the local serilizer that is used by the router
@@ -28,7 +28,7 @@ pub struct Agent {
 /// An agent
 impl Agent {
     pub(crate) fn new(
-        key: AgentKey,
+        key: Key,
         router_ctx: RouterCtx,
         rx: Receiver<AnyMessage>,
         serializer: Serializer,
@@ -47,7 +47,7 @@ impl Agent {
     }
 
     /// Get the key for the agent
-    pub(crate) fn key(&self) -> AgentKey {
+    pub(crate) fn key(&self) -> Key {
         self.key
     }
 
@@ -270,7 +270,7 @@ impl Agent {
         bridge: Address,
         address: impl Serialize,
     ) -> Result<Address> {
-        let session: SessionKey = match bridge.0 {
+        let session: Key = match bridge.0 {
             InternalAddress::Local(session) => session.into(),
             InternalAddress::Remote { .. } => panic!("can not use a remote address as the bridge"),
         };
@@ -295,7 +295,7 @@ impl Agent {
 
     async fn new_agent(&self, address: impl Serialize, cap: Option<usize>) -> Result<Agent> {
         let address = self.router_ctx.serialize(&address)?;
-        let (rx, msg) = RouterMessage::new_agent(Some(address), cap, self.serializer);
+        let (rx, msg) = RouterMessage::new_agent(Some(address), cap, self.serializer, KeyKind::Agent);
         self.router_ctx.send(msg).await?;
         Ok(rx.recv_async().await?)
     }
@@ -344,8 +344,8 @@ impl Agent {
         &self,
         stream: impl Stream,
         address: impl Serialize + Send + 'static,
-        session: Option<SessionKey>,
-    ) -> Option<SessionKey> {
+        session: Option<Key>,
+    ) -> Option<Key> {
         let heartbeat = None;
         crate::bridge::connect(
             stream,

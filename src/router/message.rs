@@ -5,17 +5,17 @@ use crate::address::InternalAddress;
 use crate::error::Result;
 use crate::request::{CallbackValue, LocalResponse, Pending, Request};
 use crate::serializer::Serializer;
-use crate::slab::{AgentKey, WriterKey, RemoteKey};
+use crate::storage::{Key, KeyKind, RemoteKey};
 use crate::value::{AnyValue, Incoming, Initial, RemoteVal};
-use crate::{Agent, SessionKey};
+use crate::Agent;
 
 use super::Session;
 
 pub(crate) enum RouterMessage {
     /// Send a value to a local agent
     Value {
-        sender: AgentKey,
-        recipient: AgentKey,
+        sender: Key,
+        recipient: Key,
         value: AnyValue,
     },
     /// An agent sending a value to a remote via a bridge.
@@ -24,31 +24,31 @@ pub(crate) enum RouterMessage {
     IncomingRemoteValue(RemoteVal<Incoming>),
     /// Get the serializer for an agent
     GetSerializer {
-        key: u64,
+        key: Key,
         reply: Sender<Result<Serializer>>,
     },
     /// Make a local request
     LocalRequest {
-        sender: AgentKey,
-        recipient: AgentKey,
+        sender: Key,
+        recipient: Key,
         request: Request<Pending>,
     },
     /// Request a local address
     ResolveLocal {
-        reply: Sender<Result<AgentKey>>,
+        reply: Sender<Result<Key>>,
         address: Box<[u8]>,
     },
     /// Request a remote address
     ResolveRemote {
         reply: Sender<Result<RemoteKey>>,
-        session: SessionKey,
+        session: Key,
         address: Box<[u8]>,
     },
     /// Reader responds to writer
     RespondResolveRemote {
         callback: u64,
-        address: Option<AgentKey>,
-        writer: SessionKey,
+        address: Option<Key>,
+        writer: Key,
     },
     /// Shutdown the router
     Shutdown,
@@ -58,26 +58,27 @@ pub(crate) enum RouterMessage {
         cap: Option<usize>,
         address: Option<Box<[u8]>>,
         serializer: Serializer,
+        kind: KeyKind,
     },
     /// Remove an agent
-    RemoveAgent(AgentKey),
+    RemoveAgent(Key),
     /// Issue a callback
     Callback {
         callback_id: u64,
         callback_value: CallbackValue,
     },
     Track {
-        tracker: AgentKey,
-        target: AgentKey,
+        tracker: Key,
+        target: Key,
     },
-    SessionExists(SessionKey, Sender<bool>),
+    SessionExists(Key, Sender<bool>),
     CleanupSessions,
-    RemoveWriter(WriterKey),
+    RemoveWriter(Key),
 }
 
 impl RouterMessage {
     /// Create a message wrapping a Value message
-    pub(crate) fn value(sender: AgentKey, recipient: AgentKey, value: AnyValue) -> Self {
+    pub(crate) fn value(sender: Key, recipient: Key, value: AnyValue) -> Self {
         Self::Value {
             recipient,
             value,
@@ -99,10 +100,10 @@ impl RouterMessage {
         }))
     }
 
-    pub(crate) fn get_serializer(key: SessionKey) -> (Receiver<Result<Serializer>>, Self) {
+    pub(crate) fn get_serializer(key: Key) -> (Receiver<Result<Serializer>>, Self) {
         let (tx, rx) = bounded(0);
         let msg = Self::GetSerializer {
-            key: key.consume(),
+            key,
             reply: tx,
         };
         (rx, msg)
@@ -110,8 +111,8 @@ impl RouterMessage {
 
     /// Create a request
     pub(crate) fn local_request(
-        sender: AgentKey,
-        recipient: AgentKey,
+        sender: Key,
+        recipient: Key,
         value: AnyValue,
     ) -> (LocalResponse, Self) {
         let (request, response) = Request::new(value);
@@ -131,7 +132,7 @@ impl RouterMessage {
     }
 
     /// Resolve a local address
-    pub(crate) fn resolve_local(address: Box<[u8]>) -> (Receiver<Result<AgentKey>>, Self) {
+    pub(crate) fn resolve_local(address: Box<[u8]>) -> (Receiver<Result<Key>>, Self) {
         let (tx, rx) = flume::bounded(0);
         let msg = RouterMessage::ResolveLocal { reply: tx, address };
 
@@ -140,7 +141,7 @@ impl RouterMessage {
 
     /// Resolve a remote address
     pub(crate) fn resolve_remote(
-        session: SessionKey,
+        session: Key,
         address: Box<[u8]>,
     ) -> (Receiver<Result<RemoteKey>>, Self) {
         let (tx, rx) = flume::bounded(0);
@@ -156,8 +157,8 @@ impl RouterMessage {
     /// Response to a remote resolution request
     pub(crate) fn respond_resolve_remote(
         callback: u64,
-        address: Option<AgentKey>,
-        writer: SessionKey,
+        address: Option<Key>,
+        writer: Key,
     ) -> Self {
         Self::RespondResolveRemote {
             callback,
@@ -170,6 +171,7 @@ impl RouterMessage {
         address: Option<Box<[u8]>>,
         cap: Option<usize>,
         serializer: Serializer,
+        kind: KeyKind,
     ) -> (Receiver<Agent>, RouterMessage) {
         let (tx, rx) = flume::bounded(0);
         let msg = Self::NewAgent {
@@ -177,12 +179,13 @@ impl RouterMessage {
             address,
             cap,
             serializer,
+            kind,
         };
 
         (rx, msg)
     }
 
-    pub(crate) fn remove_agent(key: AgentKey) -> RouterMessage {
+    pub(crate) fn remove_agent(key: Key) -> RouterMessage {
         Self::RemoveAgent(key)
     }
 }

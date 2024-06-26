@@ -6,8 +6,7 @@ use crate::agent::{WriterAgent, SessionAgent};
 use crate::bridge::{SessionMessage, WriterMessage};
 use crate::error::Result;
 use crate::queue::Queue;
-use crate::slab::WriterKey;
-use crate::SessionKey;
+use crate::storage::Key;
 
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, Default)]
@@ -74,7 +73,7 @@ pub(crate) struct Session {
     expiration: Expiration,
     agent: SessionAgent,
     backlog: Queue<WriterMessage>,
-    writer_key: WriterKey,
+    writer_key: Key,
     state: State,
 }
 
@@ -82,7 +81,7 @@ impl Session {
     pub(crate) fn new(
         expiration: Expiration,
         agent: SessionAgent,
-        writer_key: WriterKey,
+        writer_key: Key,
         cap: usize,
     ) -> Self {
         Self {
@@ -147,8 +146,8 @@ impl Session {
         Ok(())
     }
 
-    pub(crate) fn key(&self) -> SessionKey {
-        self.agent.key().into()
+    pub(crate) fn key(&self) -> Key {
+        self.agent.key()
     }
 }
 
@@ -162,10 +161,11 @@ mod test {
     async fn expire_session() {
         let mut router = Router::new();
         let router_ctx = router.ctx();
+        tokio::spawn(router.run());
         let serializer = Serializer::Json;
 
-        let agent = router_ctx
-            .new_writer_agent("session", None, serializer)
+        let session_agent = router_ctx
+            .new_session_agent("session", None, serializer)
             .await
             .unwrap();
 
@@ -176,8 +176,8 @@ mod test {
 
         let bridge_key = writer_agent.key();
 
-        agent.track(writer_agent.key()).await;
+        session_agent.track(writer_agent.key()).await;
         let expiration = Expiration::after(Duration::from_secs(60 * 5));
-        let session = Session::new(expiration, agent, bridge_key, 100);
+        let session = Session::new(expiration, session_agent, bridge_key, 100);
     }
 }

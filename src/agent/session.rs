@@ -5,8 +5,8 @@ use crate::address::InternalAddress;
 use crate::bridge::{SessionMessage, WriterMessage};
 use crate::error::Result;
 use crate::serializer::Serializer;
-use crate::slab::WriterKey;
-use crate::{Agent, SessionKey};
+use crate::storage::Key;
+use crate::Agent;
 
 #[derive(Debug)]
 pub(crate) struct SessionAgent(Agent);
@@ -16,7 +16,7 @@ impl SessionAgent {
         Self(agent)
     }
 
-    pub(crate) fn key(&self) -> SessionKey {
+    pub(crate) fn key(&self) -> Key {
         self.0.key().into()
     }
 
@@ -49,8 +49,8 @@ impl SessionAgent {
         }
     }
 
-    pub(crate) async fn send(&self, recipient: WriterKey, msg: WriterMessage) -> Result<()> {
-        let address = InternalAddress::Local(recipient.consume().into()).into();
+    pub(crate) async fn send(&self, writer_recipient: Key, msg: WriterMessage) -> Result<()> {
+        let address = InternalAddress::Local(writer_recipient).into();
         self.0.send_local(&address, msg).await
     }
 
@@ -62,8 +62,8 @@ impl SessionAgent {
         self.0.serializer.serialize(value)
     }
 
-    pub(crate) async fn track(&self, key: WriterKey) -> Result<()> {
-        let addr = InternalAddress::Local(key.into()).into();
+    pub(crate) async fn track(&self, key: Key) -> Result<()> {
+        let addr = InternalAddress::Local(key).into();
         self.0.track(&addr).await
     }
 
@@ -71,9 +71,9 @@ impl SessionAgent {
         let _ = self.0.remove_self().await;
     }
 
-    pub(crate) async fn remove_writer(&self, writer_key: WriterKey) -> Result<()> {
+    pub(crate) async fn remove_writer(&self, writer_key: Key) -> Result<()> {
         self.0
-            .remove_agent(InternalAddress::Local(writer_key.into()).into())
+            .remove_agent(InternalAddress::Local(writer_key).into())
             .await
     }
 }

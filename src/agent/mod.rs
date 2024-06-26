@@ -8,7 +8,7 @@ use crate::bridge::{SessionMessage, WriterMessage};
 use crate::error::{Error, Result};
 use crate::request::{Pending, Request};
 use crate::serializer::Serializer;
-use crate::slab::AgentKey;
+use crate::storage::Key;
 use crate::value::AnyValue;
 use crate::Address;
 
@@ -33,7 +33,7 @@ pub(crate) enum AnyMessage {
         request: Request<Pending>,
         sender: InternalAddress,
     },
-    AgentRemoved(AgentKey),
+    AgentRemoved(Key),
 }
 
 impl AnyMessage {
@@ -135,4 +135,8 @@ pub enum AgentMessage<T> {
     },
     /// An agent with a given address was removed
     AgentRemoved(Address),
+    /// A connection associated with the Agent was disconnected
+    Disconected,
+    /// Agent connected to a remote router
+    Connected,
 }

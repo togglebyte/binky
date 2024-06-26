@@ -5,7 +5,7 @@ use crate::address::InternalAddress;
 use crate::bridge::WriterMessage;
 use crate::error::Result;
 use crate::serializer::Serializer;
-use crate::slab::WriterKey;
+use crate::storage::Key;
 use crate::Agent;
 
 #[derive(Debug)]
@@ -16,8 +16,8 @@ impl WriterAgent {
         Self(agent)
     }
 
-    pub(crate) fn key(&self) -> WriterKey {
-        self.0.key().into()
+    pub(crate) fn key(&self) -> Key {
+        self.0.key()
     }
 
     #[tracing::instrument]
@@ -62,8 +62,8 @@ impl WriterAgent {
         self.0.serializer.serialize(value)
     }
 
-    pub(crate) async fn track(&self, key: WriterKey) -> Result<()> {
-        let addr = InternalAddress::Local(key.into()).into();
+    pub(crate) async fn track(&self, key: Key) -> Result<()> {
+        let addr = InternalAddress::Local(key).into();
         self.0.track(&addr).await
     }
 

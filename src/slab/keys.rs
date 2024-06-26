@@ -11,7 +11,7 @@ use crate::serializer::Serializer;
 pub struct RemoteKey(#[serde(with = "serde_bytes")] pub(crate) Box<[u8]>);
 
 impl RemoteKey {
-    pub(crate) fn to_key(&self, serializer: Serializer) -> AgentKey {
+    pub(crate) fn to_key(&self, serializer: Serializer) -> Key {
         serializer
             .deserialize(&self.0)
             .expect("a remote key can always be deserialized")
@@ -20,142 +20,197 @@ impl RemoteKey {
 
 /// A key for accessing a value in a Slab<T>
 #[derive(Copy, Clone, PartialEq, Hash, Eq, Serialize, Deserialize)]
-pub struct Key<T>(pub(super) u64, T);
-
-#[derive(Debug, Default, Copy, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
-pub(crate) struct Base;
-pub(crate) type BaseKey = Key<Base>;
-
-impl Key<Base> {
-    #[cfg(test)]
-    pub(super) const ZERO: Self = Self(0, Base);
-
-    pub(crate) fn new(inner: u64) -> Self {
-        Self(inner, Base)
-    }
+pub struct Key {
+    pub(super) index: u64,
+    pub(super) kind: KeyKind,
 }
 
-impl From<AgentKey> for BaseKey {
-    fn from(value: AgentKey) -> Self {
-        Key(value.0, Base)
+impl Key {
+    pub fn new(index: u64, kind: KeyKind) -> Self {
+        Self { index, kind }
     }
-}
 
-impl From<WriterKey> for BaseKey {
-    fn from(value: WriterKey) -> Self {
-        Key(value.0, Base)
-    }
-}
-
-impl From<SessionKey> for BaseKey {
-    fn from(value: SessionKey) -> Self {
-        Key(value.0, Base)
-    }
-}
-
-impl<T> Key<T> {
     pub(super) fn bump(mut self) -> Self {
         let gen = self.gen().wrapping_add(1);
         self.set_gen(gen);
         self
     }
 
-    pub(super) fn index(&self) -> usize {
-        (self.0 << 16 >> 16) as usize
-    }
-
-    pub(super) fn gen(&self) -> u16 {
-        (self.0 >> 48) as u16
-    }
-
     #[cfg(test)]
     pub(super) fn set_index(&mut self, new_index: u64) {
         new_index << 16 >> 16;
-        self.0 |= new_index;
+        self.index |= new_index;
     }
 
     pub(super) fn set_gen(&mut self, new_gen: u16) {
         let gen = (new_gen as u64) << 48;
-        self.0 |= gen;
+        self.index |= gen;
     }
 
-    pub(crate) fn consume(self) -> u64 {
-        self.0
+    pub(super) fn index(&self) -> usize {
+        (self.index << 16 >> 16) as usize
+    }
+
+    pub(crate) fn raw(&self) -> u64 {
+        self.index
+    }
+
+    pub(super) fn gen(&self) -> u16 {
+        (self.index >> 48) as u16
     }
 }
 
-impl<T: Debug> Debug for Key<T> {
+impl Debug for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<{:?} {} | {}>", self.1, self.index(), self.gen())
+        match self.kind {
+            KeyKind::Agent => write!(f, "<A {} | {}>", self.index(), self.gen()),
+            KeyKind::Writer => write!(f, "<W {} | {}>", self.index(), self.gen()),
+            KeyKind::Session => write!(f, "<S {} | {}>", self.index(), self.gen()),
+        }
     }
 }
 
-impl<T: Default> From<u64> for Key<T> {
-    fn from(value: u64) -> Self {
-        Self(value, T::default())
-    }
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
+pub(crate) enum KeyKind {
+    Agent,
+    Writer,
+    Session,
 }
 
-impl<T> From<Key<T>> for u64 {
-    fn from(key: Key<T>) -> Self {
-        key.0
-    }
-}
+// #[derive(Debug, Default, Copy, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
+// pub(crate) struct Base;
+// pub(crate) type BaseKey = Key<Base>;
 
-#[derive(Debug, Default, Copy, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
-pub struct Agent;
+// impl Key<Base> {
+//     #[cfg(test)]
+//     pub(super) const ZERO: Self = Self(0, Base);
 
-/// A key for an agent in a slab
-pub type AgentKey = Key<Agent>;
+//     pub(crate) fn new(inner: u64) -> Self {
+//         Self(inner, Base)
+//     }
+// }
 
-impl From<BaseKey> for AgentKey {
-    fn from(value: BaseKey) -> Self {
-        Key(value.0, Agent)
-    }
-}
+// impl From<AgentKey> for BaseKey {
+//     fn from(value: AgentKey) -> Self {
+//         Key(value.0, Base)
+//     }
+// }
 
-impl From<WriterKey> for AgentKey {
-    fn from(value: WriterKey) -> Self {
-        Key(value.0, Agent)
-    }
-}
+// impl From<WriterKey> for BaseKey {
+//     fn from(value: WriterKey) -> Self {
+//         Key(value.0, Base)
+//     }
+// }
 
-impl From<SessionKey> for AgentKey {
-    fn from(value: SessionKey) -> Self {
-        Key(value.0, Agent)
-    }
-}
+// impl From<SessionKey> for BaseKey {
+//     fn from(value: SessionKey) -> Self {
+//         Key(value.0, Base)
+//     }
+// }
 
-/// A key for a bridged connection (reader / writer pair) in a slab
-#[derive(Debug, Default, Copy, Clone, PartialEq, Hash, Eq)]
-pub struct Writer;
-pub type WriterKey = Key<Writer>;
+// impl<T> Key<T> {
+//     pub(super) fn bump(mut self) -> Self {
+//         let gen = self.gen().wrapping_add(1);
+//         self.set_gen(gen);
+//         self
+//     }
 
-impl From<Key<Agent>> for Key<Writer> {
-    fn from(value: Key<Agent>) -> Self {
-        Self(value.0, Writer)
-    }
-}
+//     pub(super) fn index(&self) -> usize {
+//         (self.0 << 16 >> 16) as usize
+//     }
 
-#[derive(Debug, Default, Copy, Clone, PartialEq, Hash, Eq)]
-pub struct Session;
-/// A key to a session in the router
-pub type SessionKey = Key<Session>;
+//     pub(super) fn gen(&self) -> u16 {
+//         (self.0 >> 48) as u16
+//     }
 
-impl Key<Session> {
-    pub fn to_bytes(self) -> [u8; 8] {
-        self.0.to_be_bytes()
-    }
-}
+//     #[cfg(test)]
+//     pub(super) fn set_index(&mut self, new_index: u64) {
+//         new_index << 16 >> 16;
+//         self.0 |= new_index;
+//     }
 
-impl From<Key<Writer>> for Key<Session> {
-    fn from(value: Key<Writer>) -> Self {
-        Self(value.0, Session)
-    }
-}
+//     pub(super) fn set_gen(&mut self, new_gen: u16) {
+//         let gen = (new_gen as u64) << 48;
+//         self.0 |= gen;
+//     }
 
-impl From<Key<Agent>> for Key<Session> {
-    fn from(value: Key<Agent>) -> Self {
-        Self(value.0, Session)
-    }
-}
+//     pub(crate) fn consume(self) -> u64 {
+//         self.0
+//     }
+// }
+
+// impl<T: Debug> Debug for Key<T> {
+//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+//         write!(f, "<{:?} {} | {}>", self.1, self.index(), self.gen())
+//     }
+// }
+
+// impl<T: Default> From<u64> for Key<T> {
+//     fn from(value: u64) -> Self {
+//         Self(value, T::default())
+//     }
+// }
+
+// impl<T> From<Key<T>> for u64 {
+//     fn from(key: Key<T>) -> Self {
+//         key.0
+//     }
+// }
+
+// #[derive(Debug, Default, Copy, Clone, PartialEq, Serialize, Deserialize, Hash, Eq)]
+// pub struct Agent;
+
+// // /// A key for an agent in a slab
+// // pub type AgentKey = Key<Agent>;
+
+// impl From<BaseKey> for AgentKey {
+//     fn from(value: BaseKey) -> Self {
+//         Key(value.0, Agent)
+//     }
+// }
+
+// impl From<WriterKey> for AgentKey {
+//     fn from(value: WriterKey) -> Self {
+//         Key(value.0, Agent)
+//     }
+// }
+
+// impl From<SessionKey> for AgentKey {
+//     fn from(value: SessionKey) -> Self {
+//         Key(value.0, Agent)
+//     }
+// }
+
+// /// A key for a bridged connection (reader / writer pair) in a slab
+// #[derive(Debug, Default, Copy, Clone, PartialEq, Hash, Eq)]
+// pub struct Writer;
+// pub type WriterKey = Key<Writer>;
+
+// impl From<Key<Agent>> for Key<Writer> {
+//     fn from(value: Key<Agent>) -> Self {
+//         Self(value.0, Writer)
+//     }
+// }
+
+// #[derive(Debug, Default, Copy, Clone, PartialEq, Hash, Eq)]
+// pub struct Session;
+// /// A key to a session in the router
+// pub type SessionKey = Key<Session>;
+
+// impl Key<Session> {
+//     pub fn to_bytes(self) -> [u8; 8] {
+//         self.0.to_be_bytes()
+//     }
+// }
+
+// impl From<Key<Writer>> for Key<Session> {
+//     fn from(value: Key<Writer>) -> Self {
+//         Self(value.0, Session)
+//     }
+// }
+
+// impl From<Key<Agent>> for Key<Session> {
+//     fn from(value: Key<Agent>) -> Self {
+//         Self(value.0, Session)
+//     }
+// }

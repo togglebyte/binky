@@ -1,15 +1,14 @@
 use crate::serializer::Serializer;
-use crate::slab::{AgentKey, RemoteKey};
-use crate::SessionKey;
+use crate::storage::{Key, RemoteKey};
 
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) enum InternalAddress {
     /// A local address
-    Local(AgentKey),
+    Local(Key),
     /// A remotge address including the bridge and the remote key
     Remote {
         /// The local bridge connecting the local router to the remote router
-        local_session_key: SessionKey,
+        local_session_key: Key,
         /// The remote key of the agent on the remote router
         remote_address: RemoteKey,
         /// The serializer used by the remote
@@ -19,6 +18,7 @@ pub(crate) enum InternalAddress {
 
 impl From<u64> for InternalAddress {
     fn from(value: u64) -> Self {
+        // this requires that key kind is encoded into the u64
         Self::Local(value.into())
     }
 }

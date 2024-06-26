@@ -4,15 +4,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 
 pub(crate) use self::message::{SessionMessage, WriterMessage};
-pub(crate) use self::net::connect;
 use crate::error::Result;
+pub(crate) use crate::net::connect;
 use crate::router::session::SessionNegotiation;
 use crate::router::{Expiration, RouterCtx, Session};
-use crate::slab::WriterKey;
-use crate::SessionKey;
+use crate::storage::{Key, KeyKind};
 
-mod message;
-mod net;
+pub(crate) mod message;
 
 pub(crate) struct Bridge<T> {
     listener: T,
@@ -32,7 +30,7 @@ where
         }
     }
 
-    async fn new_session(&self, writer_agent_key: WriterKey) -> Result<SessionKey> {
+    async fn new_session(&self, writer_agent_key: Key) -> Result<Key> {
         // ... create a new session agent
         let session_agent = self
             .router_ctx
@@ -81,7 +79,7 @@ where
             let session_key = match session_negotiation {
                 SessionNegotiation::HasExistingSession => {
                     // Read the session key from the connection
-                    let session_key = SessionKey::from(reader.read_u64().await?);
+                    let session_key = Key::new(reader.read_u64().await?, KeyKind::Session);
 
                     // Check if the router has an agent with the session key
                     let session_exists = self.router_ctx.session_exists(session_key).await;
@@ -101,20 +99,20 @@ where
                                 .write_u8(SessionNegotiation::InvalidSession as u8)
                                 .await?;
                             let new_session_key = self.new_session(writer_agent.key()).await?;
-                            writer.write_u64(new_session_key.into()).await?;
+                            writer.write_u64(new_session_key.raw()).await?;
                             new_session_key
                         }
                     }
                 }
                 SessionNegotiation::RequestNewSession => {
                     let new_session_key = self.new_session(writer_agent.key()).await?;
-                    writer.write_u64(new_session_key.into()).await?;
+                    writer.write_u64(new_session_key.raw()).await?;
                     new_session_key
                 }
                 _ => panic!("invalid session data"),
             };
 
-            tokio::spawn(net::read(
+            tokio::spawn(crate::net::read(
                 self.router_ctx.clone(),
                 reader,
                 self.heartbeat,
@@ -122,44 +120,10 @@ where
                 writer_agent.key(),
             ));
 
-            tokio::spawn(net::write(writer, writer_agent));
+            tokio::spawn(crate::net::write(writer, writer_agent));
         }
 
         Ok(())
-    }
-}
-
-/// Implement the `Stream` trait for any type that should be used
-/// with the `Agent::connect` function to pass data to other `Router`s.
-pub trait Stream: Send + 'static {
-    /// Split the stream into a read / write half
-    fn split(
-        self,
-    ) -> (
-        impl AsyncReadExt + Unpin + Send + 'static,
-        impl AsyncWriteExt + Unpin + Send + 'static,
-    );
-}
-
-impl Stream for TcpStream {
-    fn split(
-        self,
-    ) -> (
-        impl AsyncReadExt + Unpin + Send + 'static,
-        impl AsyncWriteExt + Unpin + Send + 'static,
-    ) {
-        self.into_split()
-    }
-}
-
-impl Stream for UnixStream {
-    fn split(
-        self,
-    ) -> (
-        impl AsyncReadExt + Unpin + Send + 'static,
-        impl AsyncWriteExt + Unpin + Send + 'static,
-    ) {
-        self.into_split()
     }
 }
 
@@ -171,7 +135,7 @@ impl Stream for UnixStream {
 /// let (read, write) = listener.accept().await.unwrap();
 /// # }
 /// ```
-pub trait Listener: Unpin + Send  + Sync+ 'static {
+pub trait Listener: Unpin + Send + Sync + 'static {
     /// Accept and split incoming streams
     fn accept(
         &mut self,

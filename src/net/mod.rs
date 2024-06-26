@@ -5,27 +5,28 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::sleep;
 use tracing::info;
 
-use super::SessionMessage;
+pub use self::connection::{Connection, Stream};
 use crate::address::InternalAddress;
 use crate::agent::WriterAgent;
 use crate::bridge::message::ReaderMessage;
-use crate::bridge::WriterMessage;
+use crate::bridge::{SessionMessage, WriterMessage};
 use crate::error::{Error, Result};
 use crate::frame::{Frame, FrameOutput};
 use crate::router::session::SessionNegotiation;
 use crate::router::{RouterCtx, RouterMessage};
 use crate::serializer::Serializer;
-use crate::slab::WriterKey;
+use crate::storage::{Key, KeyKind};
 use crate::value::Outgoing;
-use crate::{SessionKey, Stream};
+
+mod connection;
 
 pub(crate) async fn connect<T: Serialize>(
     stream: impl Stream,
     router_ctx: RouterCtx,
     heartbeat: Option<Duration>,
     address: Option<T>,
-    session: Option<SessionKey>,
-) -> Result<SessionKey> {
+    session: Option<Key>,
+) -> Result<Key> {
     let (mut reader, mut writer) = stream.split();
 
     let serializer: Serializer = reader.read_u8().await?.try_into()?;
@@ -33,32 +34,41 @@ pub(crate) async fn connect<T: Serialize>(
     let session_key = match session {
         Some(session_key) => {
             // Tell the receiving end that we have a session
-            writer.write_u8(SessionNegotiation::HasExistingSession as u8).await?;
-            writer.write_u64(session_key.into()).await?;
+            writer
+                .write_u8(SessionNegotiation::HasExistingSession as u8)
+                .await?;
+            writer.write_u64(session_key.raw()).await?;
 
             match SessionNegotiation::from(reader.read_u8().await?) {
                 SessionNegotiation::ValidSession => session_key,
-                SessionNegotiation::InvalidSession => SessionKey::from(reader.read_u64().await?),
+                SessionNegotiation::InvalidSession => {
+                    Key::new(reader.read_u64().await?, KeyKind::Session)
+                }
                 _ => todo!("return an error about invalid session"),
             }
         }
         None => {
             // Tell the receiving end that we don't have a session
-            writer.write_u8(SessionNegotiation::RequestNewSession as u8).await?;
-            SessionKey::from(reader.read_u64().await?)
+            writer
+                .write_u8(SessionNegotiation::RequestNewSession as u8)
+                .await?;
+            Key::new(reader.read_u64().await?, KeyKind::Session)
         }
-    }.into();
+    }
+    .into();
 
-    let agent = router_ctx
+    let writer_agent = router_ctx
         .new_writer_agent::<T>(address, None, serializer)
         .await?;
 
-    The session key is only needed here for reconnection.
-    Instead of always having a session, let's make the session a proxy for the writer
-    but only apply that to the server side, on the client side the reader gets the writer key
-
-    tokio::spawn(read(router_ctx.clone(), reader, heartbeat, session_key, agent.key()));
-    tokio::spawn(write(writer, agent));
+    tokio::spawn(read(
+        router_ctx.clone(),
+        reader,
+        heartbeat,
+        session_key,
+        writer_agent.key(),
+    ));
+    tokio::spawn(write(writer, writer_agent));
 
     Ok(session_key)
 }
@@ -119,8 +129,8 @@ pub(crate) async fn read(
     router_ctx: RouterCtx,
     mut reader: impl AsyncReadExt + Unpin,
     heartbeat: Option<Duration>,
-    session_key: SessionKey,
-    writer_key: WriterKey,
+    session_key: Key,
+    writer_key: Key,
 ) {
     let mut frame = Frame::empty();
 

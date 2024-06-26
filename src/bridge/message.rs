@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::slab::{WriterKey, RemoteKey};
+use crate::storage::{Key, RemoteKey};
 use crate::value::{Initial, Outgoing, RemoteVal};
 
 /// Message deserialized by the reading half of a socket
@@ -36,8 +36,8 @@ pub(crate) enum WriterMessage {
 pub(crate) enum SessionMessage {
     // Message to forward to the associated `Writer`
     Writer(WriterMessage),
-    AgentRemoved(WriterKey),
-    WriterReturned(WriterKey),
+    AgentRemoved(Key),
+    WriterReturned(Key),
     SessionPing,
     CloseWriter,
 }

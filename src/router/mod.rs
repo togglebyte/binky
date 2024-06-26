@@ -9,13 +9,13 @@ use tracing::info;
 pub(crate) use self::message::RouterMessage;
 pub(crate) use self::session::{Expiration, Session};
 use crate::address::InternalAddress;
-use crate::agent::{AnyMessage, WriterAgent, SessionAgent};
+use crate::agent::{AnyMessage, SessionAgent, WriterAgent};
 use crate::bridge::{Bridge, Listener, SessionMessage, WriterMessage};
 use crate::error::{Error, Result};
 use crate::request::{Callback, CallbackValue};
 use crate::serializer::Serializer;
-use crate::slab::{AgentKey, BaseKey, WriterKey, RemoteKey, Slab};
-use crate::{Agent, SessionKey};
+use crate::storage::{Agents, Key, KeyKind, RemoteKey, Slab};
+use crate::Agent;
 
 mod message;
 pub(crate) mod session;
@@ -54,12 +54,13 @@ impl RouterCtx {
         address: impl Into<Option<A>>,
         cap: Option<usize>,
         serializer: Serializer,
+        kind: KeyKind,
     ) -> Result<Agent> {
         let address = match &address.into() {
             Some(addr) => Some(self.serializer.serialize(&addr)?),
             None => None,
         };
-        let (rx, msg) = RouterMessage::new_agent(address, cap, serializer);
+        let (rx, msg) = RouterMessage::new_agent(address, cap, serializer, kind);
         self.tx.send_async(msg).await?;
         Ok(rx.recv_async().await?)
     }
@@ -70,7 +71,9 @@ impl RouterCtx {
         cap: Option<usize>,
         serializer: Serializer,
     ) -> Result<WriterAgent> {
-        let agent = self.new_agent(address, cap, serializer).await?;
+        let agent = self
+            .new_agent(address, cap, serializer, KeyKind::Writer)
+            .await?;
         Ok(WriterAgent::new(agent))
     }
 
@@ -80,11 +83,14 @@ impl RouterCtx {
         cap: Option<usize>,
         serializer: Serializer,
     ) -> Result<SessionAgent> {
-        let agent = self.new_agent(address, cap, serializer).await?;
+        dbg!("not parsnip");
+        let agent = self
+            .new_agent(address, cap, serializer, KeyKind::Session)
+            .await?;
         Ok(SessionAgent::new(agent))
     }
 
-    pub(crate) async fn lookup_address(&self, address: Box<[u8]>) -> Result<AgentKey> {
+    pub(crate) async fn lookup_address(&self, address: Box<[u8]>) -> Result<Key> {
         let (rx, msg) = RouterMessage::resolve_local(address);
         self.tx.send_async(msg).await?;
         rx.recv_async().await?
@@ -103,18 +109,18 @@ impl RouterCtx {
         Ok(())
     }
 
-    pub(crate) async fn track(&self, tracker: AgentKey, target: AgentKey) -> Result<()> {
+    pub(crate) async fn track(&self, tracker: Key, target: Key) -> Result<()> {
         let msg = RouterMessage::Track { tracker, target };
         Ok(self.tx.send_async(msg).await?)
     }
 
-    pub(crate) async fn remove(&self, key: AgentKey) -> Result<()> {
+    pub(crate) async fn remove(&self, key: Key) -> Result<()> {
         let msg = RouterMessage::RemoveAgent(key);
         self.tx.send_async(msg).await?;
         Ok(())
     }
 
-    pub(crate) async fn session_exists(&self, session_key: SessionKey) -> bool {
+    pub(crate) async fn session_exists(&self, session_key: Key) -> bool {
         let (tx, rx) = flume::bounded(0);
         let msg = RouterMessage::SessionExists(session_key, tx);
         let _ = self.tx.send_async(msg).await;
@@ -122,11 +128,7 @@ impl RouterCtx {
         rx.recv_async().await.unwrap_or(false)
     }
 
-    pub(crate) async fn session_track_writer(
-        &self,
-        session: SessionKey,
-        writer: WriterKey,
-    ) -> Result<()> {
+    pub(crate) async fn session_track_writer(&self, session: Key, writer: Key) -> Result<()> {
         let msg = RouterMessage::Track {
             tracker: session.into(),
             target: writer.into(),
@@ -135,7 +137,7 @@ impl RouterCtx {
         Ok(())
     }
 
-    pub(crate) async fn remove_writer(&self, writer_key: WriterKey) -> Result<()> {
+    pub(crate) async fn remove_writer(&self, writer_key: Key) -> Result<()> {
         let msg = RouterMessage::RemoveWriter(writer_key);
         self.tx.send_async(msg).await?;
         Ok(())
@@ -158,10 +160,10 @@ impl AgentEntry {
 /// A message router
 #[derive(Debug)]
 pub struct Router {
-    agents: Slab<AgentEntry>,
-    addresses: HashMap<Box<[u8]>, u64>,
-    tracked_by: HashMap<AgentKey, Vec<AgentKey>>,
-    sessions: HashMap<SessionKey, ()>,
+    agents: Agents<AgentEntry>,
+    addresses: HashMap<Box<[u8]>, Key>,
+    tracked_by: HashMap<Key, Vec<Key>>,
+    sessions: HashMap<Key, ()>,
     router_tx: Sender<RouterMessage>,
     router_rx: Receiver<RouterMessage>,
     serializer: Serializer,
@@ -176,9 +178,9 @@ impl Router {
         }
     }
 
-    async fn remove_agent(&mut self, key: AgentKey) {
+    async fn remove_agent(&mut self, key: Key) {
         eprintln!("removing: {key:?}");
-        let Some(agent) = self.agents.remove(key.into()) else { return };
+        let Some(agent) = self.agents.remove(key) else { return };
 
         if let Some(bytes) = agent.address {
             self.addresses.remove(&bytes);
@@ -201,7 +203,7 @@ impl Router {
     pub fn new() -> Self {
         let (router_tx, router_rx) = unbounded();
         Self {
-            agents: Slab::new(),
+            agents: Agents::new(),
             addresses: HashMap::default(),
             tracked_by: HashMap::default(),
             sessions: HashMap::default(),
@@ -224,6 +226,7 @@ impl Router {
         address: Option<Box<[u8]>>,
         cap: Option<usize>,
         serializer: Serializer,
+        kind: KeyKind,
     ) -> Agent {
         let (tx, rx) = match cap {
             Some(cap) => bounded(cap),
@@ -236,9 +239,9 @@ impl Router {
             serializer,
         };
 
-        let key = self.agents.insert(entry);
+        let key = self.agents.insert(entry, kind);
         if let Some(address) = address {
-            self.addresses.insert(address, key.consume());
+            self.addresses.insert(address, key);
         }
 
         Agent::new(key.into(), self.ctx(), rx, self.serializer)
@@ -259,7 +262,7 @@ impl Router {
             .serializer
             .serialize(&address)
             .expect("failed to serialize the address");
-        self.new_agent(Some(address), None, self.serializer)
+        self.new_agent(Some(address), None, self.serializer, KeyKind::Agent)
     }
 
     /// Create a new agent with an unsized capacity
@@ -278,7 +281,7 @@ impl Router {
             .serialize(&address)
             .expect("failed to serialize the address");
 
-        self.new_agent(Some(address), Some(cap), self.serializer)
+        self.new_agent(Some(address), Some(cap), self.serializer, KeyKind::Agent)
     }
 
     /// Listen to incoming messages on a given listener.
@@ -399,7 +402,6 @@ impl Router {
                     }
                 }
                 RouterMessage::GetSerializer { key, reply } => {
-                    let key: BaseKey = key.into();
                     let serializer = self.agents.get(key).map(|entry| entry.serializer);
                     reply
                         .send_async(serializer.ok_or(Error::AddressNotFound))
@@ -420,6 +422,7 @@ impl Router {
                     session,
                     address,
                 } => {
+                    // panic!("this requires that callbacks have a different key kind");
                     info!("resolve remote");
                     let Some(session_agent) = self.agents.get(session.into()) else {
                         reply.send_async(Err(Error::AddressNotFound)).await;
@@ -428,10 +431,7 @@ impl Router {
                     let callback = Callback::Resolve(reply);
                     let callback = self.callbacks.insert(callback);
 
-                    let writer_msg = WriterMessage::AddressRequest {
-                        callback: callback.consume(),
-                        address,
-                    };
+                    let writer_msg = WriterMessage::AddressRequest { callback, address };
 
                     if let Err(_e) = session_agent
                         .tx
@@ -466,8 +466,9 @@ impl Router {
                     cap,
                     address,
                     serializer,
+                    kind,
                 } => {
-                    let agent = self.new_agent(address, cap, serializer);
+                    let agent = self.new_agent(address, cap, serializer, kind);
                     let _ = reply.send_async(agent).await;
                 }
                 RouterMessage::RemoveAgent(key) => {
@@ -479,8 +480,7 @@ impl Router {
                     callback_value,
                 } => {
                     info!("callback");
-                    let callback_key: BaseKey = callback_id.into();
-                    let Some(cb) = self.callbacks.remove(callback_key) else { continue };
+                    let Some(cb) = self.callbacks.remove(callback_id) else { continue };
                     match (cb, callback_value) {
                         (Callback::Resolve(tx), CallbackValue::Resolve(value)) => {
                             // If the receiving end is removed there is nothing to do here
@@ -496,7 +496,7 @@ impl Router {
                 RouterMessage::SessionExists(key, tx) => {
                     info!("session exists query");
                     let _ = tx.send_async(self.agents.get(key.into()).is_some()).await;
-                },
+                }
                 RouterMessage::CleanupSessions => {
                     info!("cleanup sessions");
                     let mut removed_agents = vec![];
