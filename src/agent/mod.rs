@@ -136,7 +136,7 @@ pub enum AgentMessage<T> {
     /// An agent with a given address was removed
     AgentRemoved(Address),
     /// A connection associated with the Agent was disconnected
-    Disconected,
+    Disconnected,
     /// Agent connected to a remote router
     Connected,
 }

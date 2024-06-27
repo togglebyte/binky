@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use tracing::info;
 
-use crate::agent::{WriterAgent, SessionAgent};
+use crate::agent::{SessionAgent, WriterAgent};
 use crate::bridge::{SessionMessage, WriterMessage};
 use crate::error::Result;
 use crate::queue::Queue;
@@ -106,10 +106,7 @@ impl Session {
                         info!("session message received");
                         self.agent.send(self.writer_key, writer_msg).await?
                     }
-                    State::Log => {
-                        self.backlog.push(writer_msg);
-                        continue;
-                    }
+                    State::Log => drop(self.backlog.push(writer_msg)),
                 },
                 SessionMessage::AgentRemoved(key) if self.writer_key == key => {
                     self.state = State::Log;
@@ -117,6 +114,7 @@ impl Session {
                 }
                 SessionMessage::AgentRemoved(_) => continue,
                 SessionMessage::WriterReturned(new_key) => {
+                    self.state = State::Write;
                     self.writer_key = new_key;
                     while let Some(msg) = self.backlog.pop() {
                         self.agent.send(self.writer_key, msg).await?;

@@ -12,7 +12,7 @@ use crate::router::{RouterCtx, RouterMessage};
 use crate::serializer::Serializer;
 use crate::storage::{Key, KeyKind};
 use crate::value::{AnyValue, RemoteVal};
-use crate::{Address, Stream};
+use crate::{Address, Connection, Stream};
 
 /// Agent..
 #[derive(Debug)]
@@ -144,7 +144,13 @@ impl Agent {
     pub async fn track(&self, address: &Address) -> Result<()> {
         match address.inner() {
             InternalAddress::Local(key) => self.router_ctx.track(self.key(), *key).await,
-            &InternalAddress::Remote { local_session_key, .. } => self.router_ctx.track(self.key(), local_session_key.into()).await,
+            &InternalAddress::Remote {
+                local_session_key, ..
+            } => {
+                self.router_ctx
+                    .track(self.key(), local_session_key.into())
+                    .await
+            }
         }
     }
 
@@ -295,7 +301,8 @@ impl Agent {
 
     async fn new_agent(&self, address: impl Serialize, cap: Option<usize>) -> Result<Agent> {
         let address = self.router_ctx.serialize(&address)?;
-        let (rx, msg) = RouterMessage::new_agent(Some(address), cap, self.serializer, KeyKind::Agent);
+        let (rx, msg) =
+            RouterMessage::new_agent(Some(address), cap, self.serializer, KeyKind::Agent);
         self.router_ctx.send(msg).await?;
         Ok(rx.recv_async().await?)
     }
@@ -342,20 +349,16 @@ impl Agent {
     /// ```
     pub async fn connect(
         &self,
-        stream: impl Stream,
-        address: impl Serialize + Send + 'static,
-        session: Option<Key>,
-    ) -> Option<Key> {
+        connection: impl Connection,
+        address: impl Serialize + Send + Clone + 'static,
+    ) {
         let heartbeat = None;
-        crate::bridge::connect(
-            stream,
+        let handle = tokio::spawn(crate::bridge::connect(
+            connection,
             self.router_ctx.clone(),
             heartbeat,
             Some(address),
-            session,
-        )
-        .await
-        .ok()
+        ));
     }
 }
 

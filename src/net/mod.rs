@@ -5,7 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::sleep;
 use tracing::info;
 
-pub use self::connection::{Connection, Stream};
+pub use self::connection::{Connection, Stream, TcpConnection, UdsConnection};
 use crate::address::InternalAddress;
 use crate::agent::WriterAgent;
 use crate::bridge::message::ReaderMessage;
@@ -17,60 +17,78 @@ use crate::router::{RouterCtx, RouterMessage};
 use crate::serializer::Serializer;
 use crate::storage::{Key, KeyKind};
 use crate::value::Outgoing;
+use crate::SessionKey;
 
 mod connection;
 
-pub(crate) async fn connect<T: Serialize>(
-    stream: impl Stream,
+pub(crate) async fn connect<T: Serialize + Clone>(
+    mut connection: impl Connection,
     router_ctx: RouterCtx,
     heartbeat: Option<Duration>,
     address: Option<T>,
-    session: Option<Key>,
-) -> Result<Key> {
-    let (mut reader, mut writer) = stream.split();
+) -> Result<()> {
+    let mut session_key = None::<SessionKey>;
 
-    let serializer: Serializer = reader.read_u8().await?.try_into()?;
+    loop {
+        let stream = connection.connect().await;
+        // let (mut reader, mut writer) = stream.split();
 
-    let session_key = match session {
-        Some(session_key) => {
-            // Tell the receiving end that we have a session
-            writer
-                .write_u8(SessionNegotiation::HasExistingSession as u8)
-                .await?;
-            writer.write_u64(session_key.raw()).await?;
+        // let serializer: Serializer = reader.read_u8().await?.try_into()?;
 
-            match SessionNegotiation::from(reader.read_u8().await?) {
-                SessionNegotiation::ValidSession => session_key,
-                SessionNegotiation::InvalidSession => {
-                    Key::new(reader.read_u64().await?, KeyKind::Session)
-                }
-                _ => todo!("return an error about invalid session"),
-            }
-        }
-        None => {
-            // Tell the receiving end that we don't have a session
-            writer
-                .write_u8(SessionNegotiation::RequestNewSession as u8)
-                .await?;
-            Key::new(reader.read_u64().await?, KeyKind::Session)
-        }
+        // session_key = match session_key {
+        //     Some(session_key) => {
+        //         // Tell the receiving end that we have a session
+        //         writer
+        //             .write_u8(SessionNegotiation::HasExistingSession as u8)
+        //             .await?;
+        //         writer.write_u64(session_key.raw()).await?;
+
+        //         match SessionNegotiation::from(reader.read_u8().await?) {
+        //             SessionNegotiation::ValidSession => Some(session_key),
+        //             SessionNegotiation::InvalidSession => {
+        //                 Some(Key::new(reader.read_u64().await?, KeyKind::Session))
+        //             }
+        //             _ => todo!("return an error about invalid session"),
+        //         }
+        //     }
+        //     None => {
+        //         // Tell the receiving end that we don't have a session
+        //         writer
+        //             .write_u8(SessionNegotiation::RequestNewSession as u8)
+        //             .await?;
+        //         Some(Key::new(reader.read_u64().await?, KeyKind::Session))
+        //     }
+        // };
+
+        // let writer_agent = router_ctx
+        //     .new_writer_agent::<T>(address.clone(), None, serializer)
+        //     .await?;
+
+        // tokio::spawn(read(
+        //     router_ctx.clone(),
+        //     reader,
+        //     heartbeat,
+        //     session_key.unwrap(), // TODO unwrap.. ewww
+        //     writer_agent.key(),
+        // ));
+
+        // match write(writer, writer_agent).await? {
+        //     WriterState::Reconnect => continue,
+        //     WriterState::Stop => break Ok(()),
+        // }
+
+        // // Wait between reconnects
+        // match connection.sleep().await {
+        //     Ok(_) => continue,
+        //     Err(Error::NoRetry) => break Ok(()),
+        //     Err(_) => unreachable!(),
+        // }
     }
-    .into();
+}
 
-    let writer_agent = router_ctx
-        .new_writer_agent::<T>(address, None, serializer)
-        .await?;
-
-    tokio::spawn(read(
-        router_ctx.clone(),
-        reader,
-        heartbeat,
-        session_key,
-        writer_agent.key(),
-    ));
-    tokio::spawn(write(writer, writer_agent));
-
-    Ok(session_key)
+pub(crate) enum WriterState {
+    Reconnect,
+    Stop,
 }
 
 // -----------------------------------------------------------------------------
@@ -85,7 +103,7 @@ impl<W> Writer<W>
 where
     W: AsyncWriteExt + Unpin,
 {
-    async fn run(mut self) -> Result<()> {
+    async fn run(mut self) -> Result<WriterState> {
         while let Ok(msg) = self.agent.recv().await {
             match msg {
                 WriterMessage::Value(value) => {
@@ -101,11 +119,11 @@ where
                     let msg = ReaderMessage::AddressResponse { callback, address };
                     self.write_msg(msg).await?;
                 }
-                WriterMessage::Shutdown => break,
+                WriterMessage::Shutdown => return Ok(WriterState::Stop),
             }
         }
 
-        Ok(())
+        Ok(WriterState::Reconnect)
     }
 
     async fn write_msg(&mut self, msg: ReaderMessage) -> Result<()> {
@@ -118,7 +136,10 @@ where
     }
 }
 
-pub(crate) async fn write(writer: impl AsyncWriteExt + Unpin, agent: WriterAgent) -> Result<()> {
+pub(crate) async fn write(
+    writer: impl AsyncWriteExt + Unpin,
+    agent: WriterAgent,
+) -> Result<WriterState> {
     Writer { writer, agent }.run().await
 }
 
@@ -211,5 +232,4 @@ pub(crate) async fn read(
 
     info!("reader closed, removing writer");
     router_ctx.remove_writer(writer_key).await;
-    // info!("here");
 }
