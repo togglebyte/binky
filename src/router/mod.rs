@@ -10,12 +10,13 @@ pub(crate) use self::message::RouterMessage;
 pub(crate) use self::session::{Expiration, Session};
 use crate::address::InternalAddress;
 use crate::agent::{AnyMessage, SessionAgent, WriterAgent};
-use crate::bridge::{Bridge, Listener, SessionMessage, WriterMessage};
+use crate::bridge::{Bridge, SessionMessage, WriterMessage};
 use crate::error::{Error, Result};
-use crate::request::{Callback, CallbackValue};
+use crate::request::{Callback, CallbackValue, Pending, Request};
 use crate::serializer::Serializer;
 use crate::storage::{Agents, Key, KeyKind, RemoteKey, Slab};
-use crate::Agent;
+use crate::value::{AnyValue, Incoming, Initial, RemoteVal};
+use crate::{Agent, Listener};
 
 mod message;
 pub(crate) mod session;
@@ -71,9 +72,7 @@ impl RouterCtx {
         cap: Option<usize>,
         serializer: Serializer,
     ) -> Result<WriterAgent> {
-        let agent = self
-            .new_agent(address, cap, serializer, KeyKind::Writer)
-            .await?;
+        let agent = self.new_agent(address, cap, serializer, KeyKind::Writer).await?;
         Ok(WriterAgent::new(agent))
     }
 
@@ -84,9 +83,7 @@ impl RouterCtx {
         serializer: Serializer,
     ) -> Result<SessionAgent> {
         dbg!("not parsnip");
-        let agent = self
-            .new_agent(address, cap, serializer, KeyKind::Session)
-            .await?;
+        let agent = self.new_agent(address, cap, serializer, KeyKind::Session).await?;
         Ok(SessionAgent::new(agent))
     }
 
@@ -96,11 +93,7 @@ impl RouterCtx {
         rx.recv_async().await?
     }
 
-    pub(crate) async fn callback(
-        &self,
-        callback_id: u64,
-        callback_value: CallbackValue,
-    ) -> Result<()> {
+    pub(crate) async fn callback(&self, callback_id: u64, callback_value: CallbackValue) -> Result<()> {
         let msg = RouterMessage::Callback {
             callback_id,
             callback_value,
@@ -180,7 +173,9 @@ impl Router {
 
     async fn remove_agent(&mut self, key: Key) {
         eprintln!("removing: {key:?}");
-        let Some(agent) = self.agents.remove(key) else { return };
+        let Some(agent) = self.agents.remove(key) else {
+            return;
+        };
 
         if let Some(bytes) = agent.address {
             self.addresses.remove(&bytes);
@@ -189,7 +184,9 @@ impl Router {
         if let Some(tracked) = self.tracked_by.remove(&key) {
             eprintln!("notify: {tracked:?}");
             for agent in tracked {
-                let Some(agent) = self.agents.get(agent.into()) else { continue };
+                let Some(agent) = self.agents.get(agent.into()) else {
+                    continue;
+                };
                 let _ = agent.tx.send_async(AnyMessage::AgentRemoved(key)).await;
             }
         }
@@ -320,94 +317,30 @@ impl Router {
     /// ```
     #[tracing::instrument]
     pub async fn run(mut self) -> Self {
-        while let Ok(msg) = self.router_rx.recv_async().await {
+        while self.next().await {}
+        self
+    }
+
+    pub(crate) async fn next(&mut self) -> bool {
+        if let Ok(msg) = self.router_rx.recv_async().await {
             match msg {
                 RouterMessage::Value {
                     recipient,
                     value,
                     sender,
-                } => {
-                    let Some(agent) = self.agents.get(recipient.into()) else {
-                        continue;
-                    };
-                    // If this fails it means the channel was closed and
-                    // the only thing left to do here is to remove the sending half of the channel
-                    if let Err(_) = agent
-                        .tx
-                        .send_async(AnyMessage::Value {
-                            value,
-                            sender: InternalAddress::Local(sender),
-                        })
-                        .await
-                    {
-                        self.remove_agent(recipient).await;
-                    }
-                }
-                RouterMessage::OutgoingRemoteValue(value) => {
-                    let session = value.local_session_key;
-                    let Some(session) = self.agents.get(session.into()) else {
-                        continue;
-                    };
-
-                    info!("sending outgoing remote value");
-                    session
-                        .tx
-                        .send_async(AnyMessage::Session(SessionMessage::Writer(
-                            WriterMessage::Value(value),
-                        )))
-                        .await;
-                }
-                RouterMessage::IncomingRemoteValue(value) => {
-                    info!("incoming remote value");
-
-                    // TODO
-                    // if the agent isn't found reply with a NotFound error
-                    let agent_key = value.recipient.to_key(self.serializer);
-                    let Some(agent) = self.agents.get(agent_key.into()) else {
-                        continue;
-                    };
-
-                    let incoming = value.0;
-
-                    // There is nothing to do if the agent was removed but ignore the result
-                    let _ = agent
-                        .tx
-                        .send_async(AnyMessage::RemoteValue {
-                            value: incoming.value,
-                            sender: incoming.sender,
-                        })
-                        .await;
-                }
+                } => self.value(recipient, value, sender).await,
+                RouterMessage::OutgoingRemoteValue(value) => self.outgoing_remote_value(value).await,
+                RouterMessage::IncomingRemoteValue(value) => self.incoming_remote_value(value).await,
                 RouterMessage::LocalRequest {
                     sender,
                     recipient,
                     request,
-                } => {
-                    info!("local request");
-                    let Some(recipient) = self.agents.get(recipient.into()) else {
-                        request.reply(Err(Error::AddressNotFound)).await;
-                        continue;
-                    };
-
-                    if let Err(e) = recipient
-                        .tx
-                        .send_async(AnyMessage::LocalRequest {
-                            request,
-                            sender: InternalAddress::Local(sender),
-                        })
-                        .await
-                    {
-                        let AnyMessage::LocalRequest { request, .. } = e.0 else { unreachable!() };
-                        request.reply(Err(Error::AddressNotFound)).await;
-                    }
-                }
+                } => self.local_request(sender, recipient, request).await,
                 RouterMessage::GetSerializer { key, reply } => {
                     let serializer = self.agents.get(key).map(|entry| entry.serializer);
-                    reply
-                        .send_async(serializer.ok_or(Error::AddressNotFound))
-                        .await;
+                    reply.send_async(serializer.ok_or(Error::AddressNotFound)).await;
                 }
-                RouterMessage::Shutdown => break,
+                RouterMessage::Shutdown => return false,
                 RouterMessage::ResolveLocal { reply, address } => {
                     let key = self
                         .addresses
@@ -422,45 +355,13 @@ impl Router {
                     session,
                     address,
                 } => {
-                    // panic!("this requires that callbacks have a different key kind");
-                    info!("resolve remote");
-                    let Some(session_agent) = self.agents.get(session.into()) else {
-                        reply.send_async(Err(Error::AddressNotFound)).await;
-                        continue;
-                    };
-                    let callback = Callback::Resolve(reply);
-                    let callback = self.callbacks.insert(callback);
-
-                    let writer_msg = WriterMessage::AddressRequest { callback, address };
-
-                    if let Err(_e) = session_agent
-                        .tx
-                        .send_async(AnyMessage::Session(SessionMessage::Writer(writer_msg)))
-                        .await
-                    {
-                        self.remove_agent(session.into()).await;
-                    }
+                    self.resolve_remote(reply, session, address).await;
                 }
                 RouterMessage::RespondResolveRemote {
                     callback,
                     address,
                     writer,
-                } => {
-                    info!("respond resolve remote");
-                    let Some(bridge) = self.agents.get(writer.into()) else {
-                        continue;
-                    };
-
-                    let address = bridge.serialize(&address).map(RemoteKey);
-
-                    let writer_msg = WriterMessage::AddressResponse { callback, address };
-
-                    // If the rx end is closed there is nothing we can do here
-                    let _ = bridge
-                        .tx
-                        .send_async(AnyMessage::Session(SessionMessage::Writer(writer_msg)))
-                        .await;
-                }
+                } => self.respond_to_resolve_remote(callback, address, writer).await,
                 RouterMessage::NewAgent {
                     reply,
                     cap,
@@ -478,16 +379,7 @@ impl Router {
                 RouterMessage::Callback {
                     callback_id,
                     callback_value,
-                } => {
-                    info!("callback");
-                    let Some(cb) = self.callbacks.remove(callback_id) else { continue };
-                    match (cb, callback_value) {
-                        (Callback::Resolve(tx), CallbackValue::Resolve(value)) => {
-                            // If the receiving end is removed there is nothing to do here
-                            let _ = tx.send_async(value).await;
-                        }
-                    }
-                }
+                } => self.callback(callback_id, callback_value).await,
                 RouterMessage::Track { tracker, target } => {
                     info!("{tracker:?} is tracking {target:?}");
                     let targets = self.tracked_by.entry(target).or_default();
@@ -497,42 +389,135 @@ impl Router {
                     info!("session exists query");
                     let _ = tx.send_async(self.agents.get(key.into()).is_some()).await;
                 }
-                RouterMessage::CleanupSessions => {
-                    info!("cleanup sessions");
-                    let mut removed_agents = vec![];
-                    for key in self.sessions.keys().copied() {
-                        match self.agents.get(key.into()) {
-                            Some(agent) => {
-                                if let Err(_e) = agent
-                                    .tx
-                                    .send_async(AnyMessage::Session(SessionMessage::SessionPing))
-                                    .await
-                                {
-                                    removed_agents.push(key);
-                                }
-                            }
-                            None => removed_agents.push(key),
-                        }
-                    }
-
-                    for dead_session in removed_agents {
-                        self.remove_agent(dead_session.into()).await;
-                    }
-                }
-                RouterMessage::RemoveWriter(writer_key) => {
-                    info!("remove writer {writer_key:?}");
-                    let Some(writer) = self.agents.remove(writer_key.into()) else { continue };
-                    if let Err(_e) = writer
-                        .tx
-                        .send_async(AnyMessage::Writer(WriterMessage::Shutdown))
-                        .await
-                    {
-                        self.remove_agent(writer_key.into()).await;
-                    }
-                }
+                RouterMessage::RemoveWriter(writer_key) => self.remove_writer(writer_key).await,
             }
         }
-        self
+
+        true
+    }
+
+    async fn value(&mut self, recipient: Key, value: AnyValue, sender: Key) {
+        let Some(agent) = self.agents.get(recipient) else {
+            return;
+        };
+        // If this fails it means the channel was closed and
+        // the only thing left to do here is to remove the sending half of the channel
+        if let Err(_) = agent
+            .tx
+            .send_async(AnyMessage::Value {
+                value,
+                sender: InternalAddress::Local(sender),
+            })
+            .await
+        {
+            self.remove_agent(recipient).await;
+        }
+    }
+
+    async fn outgoing_remote_value(&self, value: RemoteVal<Initial>) {
+        let session = value.local_session_key;
+        let Some(session) = self.agents.get(session.into()) else { return };
+
+        info!("sending outgoing remote value");
+        session
+            .tx
+            .send_async(AnyMessage::Session(SessionMessage::Writer(WriterMessage::Value(value))))
+            .await;
+    }
+
+    async fn incoming_remote_value(&self, value: RemoteVal<Incoming>) {
+        info!("incoming remote value");
+
+        // TODO
+        // if the agent isn't found reply with a NotFound error
+        let agent_key = value.recipient.to_key(self.serializer);
+        let Some(agent) = self.agents.get(agent_key.into()) else { return };
+
+        let incoming = value.0;
+
+        // There is nothing to do if the agent was removed but ignore the result
+        let _ = agent
+            .tx
+            .send_async(AnyMessage::RemoteValue {
+                value: incoming.value,
+                sender: incoming.sender,
+            })
+            .await;
+    }
+
+    async fn local_request(&self, sender: Key, recipient: Key, request: Request<Pending>) {
+        info!("local request");
+        let Some(recipient) = self.agents.get(recipient.into()) else {
+            request.reply(Err(Error::AddressNotFound)).await;
+            return;
+        };
+
+        if let Err(e) = recipient
+            .tx
+            .send_async(AnyMessage::LocalRequest {
+                request,
+                sender: InternalAddress::Local(sender),
+            })
+            .await
+        {
+            let AnyMessage::LocalRequest { request, .. } = e.0 else { unreachable!() };
+            request.reply(Err(Error::AddressNotFound)).await;
+        }
+    }
+
+    async fn resolve_remote(&mut self, reply: Sender<Result<RemoteKey>>, session: Key, address: Box<[u8]>) {
+        // panic!("this requires that callbacks have a different key kind");
+        info!("resolve remote");
+        let Some(session_agent) = self.agents.get(session.into()) else {
+            reply.send_async(Err(Error::AddressNotFound)).await;
+            return;
+        };
+        let callback = Callback::Resolve(reply);
+        let callback = self.callbacks.insert(callback);
+
+        let writer_msg = WriterMessage::AddressRequest { callback, address };
+
+        if let Err(_e) = session_agent
+            .tx
+            .send_async(AnyMessage::Session(SessionMessage::Writer(writer_msg)))
+            .await
+        {
+            self.remove_agent(session.into()).await;
+        }
+    }
+
+    async fn respond_to_resolve_remote(&self, callback: u64, address: Option<Key>, writer: Key) {
+        info!("respond resolve remote");
+        let Some(bridge) = self.agents.get(writer.into()) else { return };
+
+        let address = bridge.serialize(&address).map(RemoteKey);
+
+        let writer_msg = WriterMessage::AddressResponse { callback, address };
+
+        // If the rx end is closed there is nothing we can do here
+        let _ = bridge
+            .tx
+            .send_async(AnyMessage::Session(SessionMessage::Writer(writer_msg)))
+            .await;
+    }
+
+    async fn callback(&mut self, callback_id: u64, callback_value: CallbackValue) {
+        info!("callback");
+        let Some(cb) = self.callbacks.remove(callback_id) else { return };
+        match (cb, callback_value) {
+            (Callback::Resolve(tx), CallbackValue::Resolve(value)) => {
+                // If the receiving end is removed there is nothing to do here
+                let _ = tx.send_async(value).await;
+            }
+        }
+    }
+
+    async fn remove_writer(&mut self, key: Key) {
+        info!("remove writer {key:?}");
+        let Some(writer) = self.agents.remove(key.into()) else { return };
+        if let Err(_e) = writer.tx.send_async(AnyMessage::Writer(WriterMessage::Shutdown)).await {
+            self.remove_agent(key.into()).await;
+        }
     }
 }
 
@@ -572,9 +557,7 @@ mod test {
         let recipient = a.resolve(Address::B).await.unwrap();
         a.send(&recipient, "hello".to_string()).await;
 
-        let AgentMessage::Value { value, sender } = b.recv::<String>().await.unwrap() else {
-            panic!()
-        };
+        let AgentMessage::Value { value, sender } = b.recv::<String>().await.unwrap() else { panic!() };
 
         assert_eq!("hello".to_string(), value);
         assert_eq!(a.address(), sender);
@@ -634,9 +617,7 @@ mod test {
             assert_eq!(response.unwrap(), 3);
         });
 
-        let AgentMessage::Request { request, .. } = b.recv::<String>().await.unwrap() else {
-            panic!()
-        };
+        let AgentMessage::Request { request, .. } = b.recv::<String>().await.unwrap() else { panic!() };
         let request = request.read::<(u8, u8)>().unwrap();
         let (a, b) = *request;
         request.reply(a + b).await;

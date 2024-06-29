@@ -6,6 +6,8 @@ use tokio::time::sleep;
 use tracing::info;
 
 pub use self::connection::{Connection, Stream, TcpConnection, UdsConnection};
+pub(crate) use self::listener::DummyListener;
+pub use self::listener::Listener;
 use crate::address::InternalAddress;
 use crate::agent::WriterAgent;
 use crate::bridge::message::ReaderMessage;
@@ -17,9 +19,9 @@ use crate::router::{RouterCtx, RouterMessage};
 use crate::serializer::Serializer;
 use crate::storage::{Key, KeyKind};
 use crate::value::Outgoing;
-use crate::SessionKey;
 
 mod connection;
+mod listener;
 
 pub(crate) async fn connect<T: Serialize + Clone>(
     mut connection: impl Connection,
@@ -27,62 +29,53 @@ pub(crate) async fn connect<T: Serialize + Clone>(
     heartbeat: Option<Duration>,
     address: Option<T>,
 ) -> Result<()> {
-    let mut session_key = None::<SessionKey>;
+    let mut session_key = None::<Key>;
 
     loop {
-        let stream = connection.connect().await;
-        // let (mut reader, mut writer) = stream.split();
+        let stream = connection.connect().await?;
+        let (mut reader, mut writer) = stream.split();
 
-        // let serializer: Serializer = reader.read_u8().await?.try_into()?;
+        // Get the serializer
+        let serializer: Serializer = reader.read_u8().await?.try_into()?;
 
-        // session_key = match session_key {
-        //     Some(session_key) => {
-        //         // Tell the receiving end that we have a session
-        //         writer
-        //             .write_u8(SessionNegotiation::HasExistingSession as u8)
-        //             .await?;
-        //         writer.write_u64(session_key.raw()).await?;
+        // Get the session key
+        let key = match session_key {
+            Some(session_key) => {
+                // Tell the receiving end that we have a session
+                writer.write_u8(SessionNegotiation::HasExistingSession as u8).await?;
+                writer.write_u64(session_key.raw()).await?;
 
-        //         match SessionNegotiation::from(reader.read_u8().await?) {
-        //             SessionNegotiation::ValidSession => Some(session_key),
-        //             SessionNegotiation::InvalidSession => {
-        //                 Some(Key::new(reader.read_u64().await?, KeyKind::Session))
-        //             }
-        //             _ => todo!("return an error about invalid session"),
-        //         }
-        //     }
-        //     None => {
-        //         // Tell the receiving end that we don't have a session
-        //         writer
-        //             .write_u8(SessionNegotiation::RequestNewSession as u8)
-        //             .await?;
-        //         Some(Key::new(reader.read_u64().await?, KeyKind::Session))
-        //     }
-        // };
+                match SessionNegotiation::from(reader.read_u8().await?) {
+                    SessionNegotiation::ValidSession => session_key,
+                    SessionNegotiation::InvalidSession => Key::new(reader.read_u64().await?, KeyKind::Session),
+                    _ => todo!("return an error about invalid session"),
+                }
+            }
+            None => {
+                // Tell the receiving end that we don't have a session
+                writer.write_u8(SessionNegotiation::RequestNewSession as u8).await?;
+                Key::new(reader.read_u64().await?, KeyKind::Session)
+            }
+        };
+        session_key = Some(key);
 
-        // let writer_agent = router_ctx
-        //     .new_writer_agent::<T>(address.clone(), None, serializer)
-        //     .await?;
+        let writer_agent = router_ctx
+            .new_writer_agent::<T>(address.clone(), None, serializer)
+            .await?;
 
-        // tokio::spawn(read(
-        //     router_ctx.clone(),
-        //     reader,
-        //     heartbeat,
-        //     session_key.unwrap(), // TODO unwrap.. ewww
-        //     writer_agent.key(),
-        // ));
+        tokio::spawn(read(router_ctx.clone(), reader, heartbeat, key, writer_agent.key()));
 
-        // match write(writer, writer_agent).await? {
-        //     WriterState::Reconnect => continue,
-        //     WriterState::Stop => break Ok(()),
-        // }
+        match write(writer, writer_agent).await? {
+            WriterState::Reconnect => continue,
+            WriterState::Stop => break Ok(()),
+        }
 
-        // // Wait between reconnects
-        // match connection.sleep().await {
-        //     Ok(_) => continue,
-        //     Err(Error::NoRetry) => break Ok(()),
-        //     Err(_) => unreachable!(),
-        // }
+        // Wait between reconnects
+        match connection.sleep().await {
+            Ok(_) => continue,
+            Err(Error::NoRetry) => break Ok(()),
+            Err(_) => unreachable!(),
+        }
     }
 }
 
@@ -129,17 +122,16 @@ where
     async fn write_msg(&mut self, msg: ReaderMessage) -> Result<()> {
         // NOTE if the value can't be serialized there isn't much
         // that can be done here, so just dispose of it and return Ok (even though it's not)
-        let Ok(raw_bytes) = self.agent.serialize(&msg) else { return Ok(()) };
+        let Ok(raw_bytes) = self.agent.serialize(&msg) else {
+            return Ok(());
+        };
         let payload = FrameOutput::frame_message(&raw_bytes);
         self.writer.write(payload.as_ref()).await?;
         Ok(())
     }
 }
 
-pub(crate) async fn write(
-    writer: impl AsyncWriteExt + Unpin,
-    agent: WriterAgent,
-) -> Result<WriterState> {
+pub(crate) async fn write(writer: impl AsyncWriteExt + Unpin, agent: WriterAgent) -> Result<WriterState> {
     Writer { writer, agent }.run().await
 }
 
@@ -232,4 +224,32 @@ pub(crate) async fn read(
 
     info!("reader closed, removing writer");
     router_ctx.remove_writer(writer_key).await;
+}
+
+#[cfg(test)]
+mod test {
+    use connection::{DummyConnection, DummyStream};
+
+    use super::*;
+    use crate::{timeout, Router};
+
+    #[tokio::test]
+    async fn connect_to_router() {
+        let mut router = Router::new();
+        let listener = DummyListener::new(vec![DummyStream::new(vec![
+            SessionNegotiation::RequestNewSession as u8,
+        ])]);
+        router.listen(listener);
+
+        let mut agent = router.agent("agent 1");
+
+        let connection = DummyConnection {
+            stream: DummyStream::new(vec![Serializer::Json as u8]),
+            timeout: timeout(),
+        };
+
+        agent.connect(connection, "connection").await;
+
+        agent.recv::<()>().await;
+    }
 }

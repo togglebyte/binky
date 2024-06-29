@@ -72,7 +72,6 @@ pub(crate) enum RouterMessage {
         target: Key,
     },
     SessionExists(Key, Sender<bool>),
-    CleanupSessions,
     RemoveWriter(Key),
 }
 

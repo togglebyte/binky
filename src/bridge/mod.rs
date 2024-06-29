@@ -9,6 +9,7 @@ pub(crate) use crate::net::connect;
 use crate::router::session::SessionNegotiation;
 use crate::router::{Expiration, RouterCtx, Session};
 use crate::storage::{Key, KeyKind};
+use crate::Listener;
 
 pub(crate) mod message;
 
@@ -88,16 +89,12 @@ where
                         // If the session that was read from the connection exists then notify the
                         // connection
                         true => {
-                            writer
-                                .write_u8(SessionNegotiation::ValidSession as u8)
-                                .await?;
+                            writer.write_u8(SessionNegotiation::ValidSession as u8).await?;
                             session_key
                         }
                         // If the session is no longer valid then notify the connection and...
                         false => {
-                            writer
-                                .write_u8(SessionNegotiation::InvalidSession as u8)
-                                .await?;
+                            writer.write_u8(SessionNegotiation::InvalidSession as u8).await?;
                             let new_session_key = self.new_session(writer_agent.key()).await?;
                             writer.write_u64(new_session_key.raw()).await?;
                             new_session_key
@@ -124,49 +121,5 @@ where
         }
 
         Ok(())
-    }
-}
-
-/// A listener that returns an async read / write half
-/// ```no_run
-/// # async fn run_async() {
-/// # use tokio::net::TcpListener;
-/// let mut listener = TcpListener::bind("127.0.0.1:1234").await.unwrap();
-/// let (read, write) = listener.accept().await.unwrap();
-/// # }
-/// ```
-pub trait Listener: Unpin + Send + Sync + 'static {
-    /// Accept and split incoming streams
-    fn accept(
-        &mut self,
-    ) -> impl std::future::Future<
-        Output = Result<(
-            impl AsyncReadExt + Unpin + Send + 'static,
-            impl AsyncWriteExt + Unpin + Send + 'static,
-        )>,
-    > + Send;
-}
-
-impl Listener for TcpListener {
-    async fn accept(
-        &mut self,
-    ) -> Result<(
-        impl AsyncReadExt + Unpin + Send + 'static,
-        impl AsyncWriteExt + Unpin + Send + 'static,
-    )> {
-        let (output, _addr) = TcpListener::accept(self).await?;
-        Ok(output.into_split())
-    }
-}
-
-impl Listener for UnixListener {
-    async fn accept(
-        &mut self,
-    ) -> Result<(
-        impl AsyncReadExt + Unpin + Send + 'static,
-        impl AsyncWriteExt + Unpin + Send + 'static,
-    )> {
-        let (output, _addr) = UnixListener::accept(self).await?;
-        Ok(output.into_split())
     }
 }

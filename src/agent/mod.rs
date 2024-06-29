@@ -113,6 +113,8 @@ impl AnyMessage {
 ///             request.reply(a + b).await;
 ///         }
 ///         AgentMessage::AgentRemoved(key) => {}
+///         AgentMessage::Connected => {}
+///         AgentMessage::Disconnected => {}
 ///     }
 /// }
 /// # }

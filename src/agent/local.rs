@@ -331,19 +331,19 @@ impl Agent {
 
     /// Connect to a remote router.
     /// ```no_run
-    /// use binky::{Router, TcpStream};
+    /// use binky::{Router, TcpConnection, timeout};
     /// use serde::{Deserialize, Serialize};
     ///
-    /// #[derive(Serialize, Deserialize)]
+    /// #[derive(Copy, Clone, Serialize, Deserialize)]
     /// enum Address {
     ///     Connection,
     /// }
     ///
     /// # async fn async_run() {
     /// let mut router = Router::new();
-    /// let stream = TcpStream::connect("127.0.0.1:8000").await.unwrap();
+    /// let connection = TcpConnection::new("127.0.0.1:8000", timeout());
     /// let agent = router.agent("I'm an agent!");
-    /// let session = agent.connect(stream, Address::Connection, None);
+    /// let session = agent.connect(connection, Address::Connection);
     /// router.run().await;
     /// # }
     /// ```
@@ -353,9 +353,10 @@ impl Agent {
         address: impl Serialize + Send + Clone + 'static,
     ) {
         let heartbeat = None;
+        let ctx = self.router_ctx.clone();
         let handle = tokio::spawn(crate::bridge::connect(
             connection,
-            self.router_ctx.clone(),
+            ctx,
             heartbeat,
             Some(address),
         ));

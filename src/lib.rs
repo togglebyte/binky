@@ -25,20 +25,9 @@ mod value;
 
 pub use address::Address;
 pub use agent::{Agent, AgentMessage};
-pub use bridge::Listener;
-pub use net::{Connection, Stream, TcpConnection, UdsConnection};
+pub use net::{Listener, Connection, Stream, TcpConnection, UdsConnection};
 pub use retry::{timeout, Timeout};
 pub use router::Router;
-
-/// A session key is returned when calling [`Agent::connect`].
-/// The key might change upon reconnect and should be passed to the `connect` function upon
-/// reconnect.
-///
-/// ```no_run
-/// let mut session = None::<SessionKey>;
-/// session = agent.connect(stream, session).await;
-/// ```
-pub type SessionKey = Key;
 
 // -----------------------------------------------------------------------------
 //   - Re-exports -

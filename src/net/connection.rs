@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::io::Cursor;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -12,21 +14,24 @@ use crate::Timeout;
 /// disconnecting.
 pub trait Connection: Send + 'static {
     /// Create a stream
-    async fn connect(&mut self) -> Result<impl Stream + Send + 'static>;
+    fn connect(&mut self) -> impl Future<Output = Result<impl Stream + Send + 'static>> + Send;
 
     /// Sleep between reconnect attempts
     async fn sleep(&mut self) -> Result<()>;
 }
 
-pub(crate) struct DummyConnection(Timeout);
+pub(crate) struct DummyConnection {
+    pub(crate) stream: DummyStream,
+    pub(crate) timeout: Timeout,
+}
 
 impl Connection for DummyConnection {
-    async fn connect(&mut self) -> Result<impl Stream> {
-        Ok(DummyStream::empty())
+    fn connect(&mut self) -> impl Future<Output = Result<impl Stream + Send + 'static>> + Send {
+        async move { Ok(DummyStream::new(vec![])) }
     }
 
     async fn sleep(&mut self) -> Result<()> {
-        self.0.sleep().await
+        self.timeout.sleep().await
     }
 }
 
@@ -40,9 +45,9 @@ impl<A> TcpConnection<A> {
     }
 }
 
-impl<A: ToSocketAddrs + Send + 'static> Connection for TcpConnection<A> {
-    async fn connect(&mut self) -> Result<impl Stream> {
-        Ok(TcpStream::connect(&self.0).await?)
+impl<A: ToSocketAddrs + Send + Sync + 'static> Connection for TcpConnection<A> {
+    fn connect(&mut self) -> impl Future<Output = Result<impl Stream + Send + 'static>> + Send {
+        async move { Ok(TcpStream::connect(&self.0).await?) }
     }
 
     async fn sleep(&mut self) -> Result<()> {
@@ -65,36 +70,28 @@ pub trait Stream: Send + 'static {
     );
 }
 
-pub(crate) struct DummyStream<R, W>(R, W);
+pub(crate) struct DummyStream {
+    read: Cursor<Vec<u8>>,
+    write: Vec<u8>,
+}
 
-impl DummyStream<Empty, Vec<u8>> {
-    pub fn empty() -> DummyStream<Empty, Vec<u8>> {
-        Self(empty(), vec![])
+impl DummyStream {
+    pub fn new(read: Vec<u8>) -> Self {
+        Self {
+            read: Cursor::new(read),
+            write: vec![],
+        }
     }
 }
 
-impl DummyStream<Repeat, Vec<u8>> {
-    pub fn repeat(byte: u8) -> Self {
-        Self(repeat(byte), vec![])
-    }
-}
-
-impl DummyStream<Vec<u8>, Vec<u8>> {
-    pub fn new(data: Vec<u8>) -> Self {
-        Self(data, vec![])
-    }
-}
-
-impl<R: AsyncRead + Unpin + Send + 'static, W: AsyncWrite + Unpin + Send + 'static> Stream
-    for DummyStream<R, W>
-{
+impl Stream for DummyStream {
     fn split(
         self,
     ) -> (
         impl AsyncReadExt + Unpin + Send + 'static,
         impl AsyncWriteExt + Unpin + Send + 'static,
     ) {
-        (self.0, self.1)
+        (self.read, self.write)
     }
 }
 
