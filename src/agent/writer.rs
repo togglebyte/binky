@@ -2,7 +2,7 @@ use serde::Serialize;
 use tracing::{error, info};
 
 use crate::address::InternalAddress;
-use crate::bridge::WriterMessage;
+use crate::bridge::{SessionMessage, WriterMessage};
 use crate::error::Result;
 use crate::serializer::Serializer;
 use crate::storage::Key;
@@ -32,24 +32,22 @@ impl WriterAgent {
             // The bridge should perhaps just ignore
             // agent messages? Maybe a log entry?
             super::AnyMessage::RemoteValue { .. } => {
-                unreachable!("bridge agent should never get a remote value")
+                panic!("bridge agent should never get a remote value")
             }
+            // TODO: when does this ever happen?
+            //       isn't every message to be written a `SessionMessage::Writer(msg)` message?
             super::AnyMessage::Value { value, .. } => {
-                let val = value
-                    .downcast::<WriterMessage>();
-                
+                let val = value.downcast::<WriterMessage>();
                 info!("received a message (downcast)");
-                let is_err = val.is_err();
-
-                let val = *val
-                    .expect("only `Writer` messages can be sent to the writer");
+                let val = *val.expect("only `Writer` messages can be sent to the writer");
                 Ok(val)
             }
             super::AnyMessage::LocalRequest { .. } => todo!("local request"),
-            super::AnyMessage::AgentRemoved(_) => todo!(), // TODO this is no longer relevant? -tb 2024-06-21  Ok(SessionMessage::AgentRemoved(key.into())),
+            super::AnyMessage::AgentRemoved(_) => todo!(), // TODO is this no longer relevant? -tb 2024-06-21  Ok(SessionMessage::AgentRemoved(key.into())),
+            super::AnyMessage::Session(SessionMessage::Writer(msg)) => Ok(msg),
             super::AnyMessage::Session(sess_msg) => {
                 error!("received a session message (it shouldn't): {sess_msg:?}");
-                todo!()
+                todo!("({sess_msg:?}")
             }
         }
     }

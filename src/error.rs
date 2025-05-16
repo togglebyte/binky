@@ -52,6 +52,10 @@ pub enum Error {
     /// Exhausted all retries
     #[error("no more retries")]
     NoRetry,
+
+    /// Max frame buffer reached
+    #[error("there is no more room in the buffer")]
+    NoSpaceLeftInBuffer,
 }
 
 impl<T> From<flume::SendError<T>> for Error {

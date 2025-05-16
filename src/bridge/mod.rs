@@ -38,7 +38,7 @@ where
             .await?;
 
         // ... track the writer agent
-        session_agent.track(writer_agent_key).await;
+        session_agent.track(writer_agent_key).await?;
 
         // ... spawn a new session
         let expiration = Expiration::after(Duration::from_secs(60 * 5));

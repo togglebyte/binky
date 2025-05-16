@@ -171,7 +171,7 @@ impl<T> Agents<T> {
 
         let mut entry = Entry::Vacant(self.next_key.take());
         swap(&mut self.inner[key.index()], &mut entry);
-        let Entry::Occupied { value, gen } = entry else { panic!() };
+        let Entry::Occupied { value, gen } = entry else { panic!("trying to remove a vacant entry") };
         if gen != key.gen() {
             panic!("generation missmatch")
         }

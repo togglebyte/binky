@@ -21,6 +21,7 @@ use crate::SessionKey;
 
 mod connection;
 
+// Client connect
 pub(crate) async fn connect<T: Serialize + Clone>(
     mut connection: impl Connection,
     router_ctx: RouterCtx,
@@ -30,59 +31,63 @@ pub(crate) async fn connect<T: Serialize + Clone>(
     let mut session_key = None::<SessionKey>;
 
     loop {
-        let stream = connection.connect().await;
-        // let (mut reader, mut writer) = stream.split();
+        let stream = match connection.connect().await {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("{e}");
+                connection.sleep().await?;
+                continue;
+            }
+        };
 
-        // let serializer: Serializer = reader.read_u8().await?.try_into()?;
+        let (mut reader, mut writer) = stream.split();
 
-        // session_key = match session_key {
-        //     Some(session_key) => {
-        //         // Tell the receiving end that we have a session
-        //         writer
-        //             .write_u8(SessionNegotiation::HasExistingSession as u8)
-        //             .await?;
-        //         writer.write_u64(session_key.raw()).await?;
+        let serializer: Serializer = reader.read_u8().await?.try_into()?;
 
-        //         match SessionNegotiation::from(reader.read_u8().await?) {
-        //             SessionNegotiation::ValidSession => Some(session_key),
-        //             SessionNegotiation::InvalidSession => {
-        //                 Some(Key::new(reader.read_u64().await?, KeyKind::Session))
-        //             }
-        //             _ => todo!("return an error about invalid session"),
-        //         }
-        //     }
-        //     None => {
-        //         // Tell the receiving end that we don't have a session
-        //         writer
-        //             .write_u8(SessionNegotiation::RequestNewSession as u8)
-        //             .await?;
-        //         Some(Key::new(reader.read_u64().await?, KeyKind::Session))
-        //     }
-        // };
+        session_key = match session_key {
+            Some(session_key) => {
+                // Tell the receiving end that we have a session
+                writer
+                    .write_u8(SessionNegotiation::HasExistingSession as u8)
+                    .await?;
+                writer.write_u64(session_key.raw()).await?;
 
-        // let writer_agent = router_ctx
-        //     .new_writer_agent::<T>(address.clone(), None, serializer)
-        //     .await?;
+                match SessionNegotiation::from(reader.read_u8().await?) {
+                    SessionNegotiation::ValidSession => Some(session_key),
+                    SessionNegotiation::InvalidSession => {
+                        Some(Key::new(reader.read_u64().await?, KeyKind::Session))
+                    }
+                    _ => todo!("return an error about invalid session"),
+                }
+            }
+            None => {
+                // Tell the receiving end that we don't have a session
+                writer
+                    .write_u8(SessionNegotiation::RequestNewSession as u8)
+                    .await?;
+                Some(Key::new(reader.read_u64().await?, KeyKind::Session))
+            }
+        };
 
-        // tokio::spawn(read(
-        //     router_ctx.clone(),
-        //     reader,
-        //     heartbeat,
-        //     session_key.unwrap(), // TODO unwrap.. ewww
-        //     writer_agent.key(),
-        // ));
+        let writer_agent = router_ctx
+            .new_writer_agent::<T>(address.clone(), None, serializer)
+            .await?;
 
-        // match write(writer, writer_agent).await? {
-        //     WriterState::Reconnect => continue,
-        //     WriterState::Stop => break Ok(()),
-        // }
+        tokio::spawn(read(
+            router_ctx.clone(),
+            reader,
+            heartbeat,
+            session_key.unwrap(), // TODO unwrap.. ewww
+            writer_agent.key(),
+        ));
 
-        // // Wait between reconnects
-        // match connection.sleep().await {
-        //     Ok(_) => continue,
-        //     Err(Error::NoRetry) => break Ok(()),
-        //     Err(_) => unreachable!(),
-        // }
+        match write(writer, writer_agent).await? {
+            WriterState::Reconnect => continue,
+            WriterState::Stop => break Ok(()),
+        }
+
+        // Wait between reconnects
+        connection.sleep().await?;
     }
 }
 
@@ -129,9 +134,10 @@ where
     async fn write_msg(&mut self, msg: ReaderMessage) -> Result<()> {
         // NOTE if the value can't be serialized there isn't much
         // that can be done here, so just dispose of it and return Ok (even though it's not)
+
         let Ok(raw_bytes) = self.agent.serialize(&msg) else { return Ok(()) };
         let payload = FrameOutput::frame_message(&raw_bytes);
-        self.writer.write(payload.as_ref()).await?;
+        self.writer.write_all(payload.as_ref()).await?;
         Ok(())
     }
 }
@@ -165,6 +171,8 @@ pub(crate) async fn read(
         let should_break = tokio::select! {
             _ = timeout => true,
             res = frame.read_async(&mut reader) => {
+                log::info!("{res:?}");
+
                 match res {
                     Ok(0) => break 'read,
                     Ok(_byte_count) => 'msg: loop {
@@ -180,6 +188,7 @@ pub(crate) async fn read(
                                                     remote_address: sender,
                                                     remote_serializer: reply_serializer.try_into().expect("this is always created from a serializer"),
                                                 };
+
                                                 let msg = RouterMessage::incoming(value, sender, recipient);
                                                 router_ctx.send(msg).await;
                                             }
@@ -192,17 +201,12 @@ pub(crate) async fn read(
                                                 let address = address.ok_or(Error::AddressNotFound);
                                                 // TODO
                                                 // What do we do if the callback fails?
-                                                // This can onlyh happen if the Receiver in the
-                                                // router has closed down, meaning the router
+                                                // This can only happen if the `Receiver` in the
+                                                // router is closed, meaning the router
                                                 // is inaccessible, meaning there is no reason to
                                                 // continue the program
                                                 router_ctx.callback(callback, address.into()).await;
                                             }
-                                            //RemoteMessage::AddressRequest { address, callback_id } => {
-                                            //    let msg = RouterMessage::something(address, callback_id, writer);
-                                            //    router_ctx.send(msg).await;
-                                            //}
-                                            //RemoteMessage::ResolveResponse { address, callback_id } => todo!(),
                                         }
                                     }
                                     FrameOutput::Heartbeat => continue,
@@ -217,6 +221,7 @@ pub(crate) async fn read(
                         }
                     },
                     Err(e) => {
+                        panic!("{e:?}");
                         log::error!("{e}");
                         break;
                     }

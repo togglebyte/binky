@@ -99,6 +99,7 @@ impl Session {
 
     #[tracing::instrument]
     pub(crate) async fn run(mut self) -> Result<()> {
+        tracing::info!("running session");
         while let Ok(msg) = self.agent.recv().await {
             match msg {
                 SessionMessage::Writer(writer_msg) => match self.state {

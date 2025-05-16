@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -12,17 +13,21 @@ use crate::Timeout;
 /// disconnecting.
 pub trait Connection: Send + 'static {
     /// Create a stream
-    async fn connect(&mut self) -> Result<impl Stream + Send + 'static>;
+    fn connect(
+        &mut self,
+    ) -> impl Future<Output = Result<impl Stream + Send + 'static>> + Send + 'static;
 
     /// Sleep between reconnect attempts
-    async fn sleep(&mut self) -> Result<()>;
+    fn sleep(&mut self) -> impl Future<Output=Result<()>> + Send;
 }
 
 pub(crate) struct DummyConnection(Timeout);
 
 impl Connection for DummyConnection {
-    async fn connect(&mut self) -> Result<impl Stream> {
-        Ok(DummyStream::empty())
+    fn connect(
+        &mut self,
+    ) -> impl Future<Output = Result<impl Stream + Send + 'static>> + Send + 'static {
+        async { Ok(DummyStream::empty()) }
     }
 
     async fn sleep(&mut self) -> Result<()> {
@@ -40,9 +45,12 @@ impl<A> TcpConnection<A> {
     }
 }
 
-impl<A: ToSocketAddrs + Send + 'static> Connection for TcpConnection<A> {
-    async fn connect(&mut self) -> Result<impl Stream> {
-        Ok(TcpStream::connect(&self.0).await?)
+impl<A: ToSocketAddrs + Clone + Send + 'static> Connection for TcpConnection<A> {
+    fn connect(
+        &mut self,
+    ) -> impl Future<Output = Result<impl Stream + Send + 'static>> + Send + 'static {
+        let addr = self.0.clone();
+        async { Ok(TcpStream::connect(addr).await?) }
     }
 
     async fn sleep(&mut self) -> Result<()> {

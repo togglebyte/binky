@@ -3,12 +3,13 @@ use serde::Serialize;
 
 use crate::error::{Error, Result};
 
+/// Serializer used by the router to determine the message serialization format.
 #[derive(Debug, Copy, Clone, PartialEq)]
 #[repr(u8)]
-pub(crate) enum Serializer {
-    // Plain text
+pub enum Serializer {
+    /// Plain text
     Json = 0,
-    // Binary
+    /// Binary
     Postcard = 1,
 }
 

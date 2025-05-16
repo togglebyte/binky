@@ -31,9 +31,7 @@ impl Timeout {
     pub async fn sleep(&mut self) -> Result<()> {
         match &mut self.retries {
             RetryCount::Count(0) | RetryCount::Never => return Err(Error::NoRetry),
-            RetryCount::Count(count) => {
-                *count -= 1;
-            }
+            RetryCount::Count(count) => *count -= 1,
             RetryCount::Forever => {}
         }
 

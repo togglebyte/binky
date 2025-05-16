@@ -1,4 +1,5 @@
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 
 pub use self::local::Agent;
 pub(crate) use self::session::SessionAgent;
@@ -15,6 +16,19 @@ use crate::Address;
 mod local;
 mod session;
 mod writer;
+
+trait AnySerializable: Send + Sync + 'static {
+    fn serialize(&self, serializer: Serializer);
+}
+
+impl<T: Send + Sync + 'static> AnySerializable for T
+where
+    T: Serialize,
+{
+    fn serialize(&self, serializer: Serializer) {
+        serializer.serialize(self);
+    }
+}
 
 pub(crate) enum AnyMessage {
     Value {
@@ -113,6 +127,8 @@ impl AnyMessage {
 ///             request.reply(a + b).await;
 ///         }
 ///         AgentMessage::AgentRemoved(key) => {}
+///         AgentMessage::Disconnected => {}
+///         AgentMessage::Connected => {}
 ///     }
 /// }
 /// # }

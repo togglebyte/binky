@@ -330,20 +330,21 @@ impl Agent {
     }
 
     /// Connect to a remote router.
+    /// 
     /// ```no_run
     /// use binky::{Router, TcpStream};
     /// use serde::{Deserialize, Serialize};
     ///
-    /// #[derive(Serialize, Deserialize)]
+    /// #[derive(Clone, Serialize, Deserialize)]
     /// enum Address {
     ///     Connection,
     /// }
     ///
     /// # async fn async_run() {
     /// let mut router = Router::new();
-    /// let stream = TcpStream::connect("127.0.0.1:8000").await.unwrap();
+    /// let connection = binky::TcpConnection::new("127.0.0.1:8000", binky::timeout());
     /// let agent = router.agent("I'm an agent!");
-    /// let session = agent.connect(stream, Address::Connection, None);
+    /// let session = agent.connect(connection, "some agent address");
     /// router.run().await;
     /// # }
     /// ```

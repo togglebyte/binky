@@ -1,8 +1,6 @@
 // TODO remove this nonsense
 #![allow(unused)]
 #![allow(private_interfaces)]
-
-// 
 #![allow(async_fn_in_trait)]
 #![deny(missing_docs)]
 //! Binky is a message passing library
@@ -29,14 +27,17 @@ pub use bridge::Listener;
 pub use net::{Connection, Stream, TcpConnection, UdsConnection};
 pub use retry::{timeout, Timeout};
 pub use router::Router;
+pub use serializer::Serializer;
 
 /// A session key is returned when calling [`Agent::connect`].
 /// The key might change upon reconnect and should be passed to the `connect` function upon
 /// reconnect.
 ///
 /// ```no_run
-/// let mut session = None::<SessionKey>;
-/// session = agent.connect(stream, session).await;
+/// # async fn run(agent: binky::Agent<()>, connection: impl binky::Connection) {
+/// let mut session = None::<binky::SessionKey>;
+/// session = agent.connect(connection, session).await;
+/// # }
 /// ```
 pub type SessionKey = Key;
 

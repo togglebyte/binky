@@ -11,6 +11,7 @@ use crate::Agent;
 
 use super::Session;
 
+#[derive(Debug)]
 pub(crate) enum RouterMessage {
     /// Send a value to a local agent
     Value {

@@ -21,6 +21,7 @@ mod message;
 pub(crate) mod session;
 
 #[derive(Debug, Clone)]
+
 pub(crate) struct RouterCtx {
     tx: Sender<RouterMessage>,
     serializer: Serializer,
@@ -83,7 +84,7 @@ impl RouterCtx {
         cap: Option<usize>,
         serializer: Serializer,
     ) -> Result<SessionAgent> {
-        dbg!("not parsnip");
+        dbg!("new session agent");
         let agent = self
             .new_agent(address, cap, serializer, KeyKind::Session)
             .await?;
@@ -93,7 +94,8 @@ impl RouterCtx {
     pub(crate) async fn lookup_address(&self, address: Box<[u8]>) -> Result<Key> {
         let (rx, msg) = RouterMessage::resolve_local(address);
         self.tx.send_async(msg).await?;
-        rx.recv_async().await?
+        let res = rx.recv_async().await?;
+        res
     }
 
     pub(crate) async fn callback(
@@ -214,6 +216,13 @@ impl Router {
         }
     }
 
+    /// Create a router with a given serializer
+    pub fn with_serializer(serializer: Serializer) -> Self {
+        let mut router = Self::new();
+        router.serializer = serializer;
+        router
+    }
+
     /// Create a new agent
     /// ```
     /// use binky::Router;
@@ -318,7 +327,7 @@ impl Router {
     /// handle.await.unwrap();
     /// # }
     /// ```
-    #[tracing::instrument]
+    // #[tracing::instrument]
     pub async fn run(mut self) -> Self {
         while let Ok(msg) = self.router_rx.recv_async().await {
             match msg {
@@ -343,6 +352,7 @@ impl Router {
                         self.remove_agent(recipient).await;
                     }
                 }
+                // This sends a message to a local writer
                 RouterMessage::OutgoingRemoteValue(value) => {
                     let session = value.local_session_key;
                     let Some(session) = self.agents.get(session.into()) else {
@@ -369,7 +379,6 @@ impl Router {
 
                     let incoming = value.0;
 
-                    // There is nothing to do if the agent was removed but ignore the result
                     let _ = agent
                         .tx
                         .send_async(AnyMessage::RemoteValue {
@@ -451,7 +460,9 @@ impl Router {
                         continue;
                     };
 
-                    let address = bridge.serialize(&address).map(RemoteKey);
+                    let address = address
+                        .and_then(|address| bridge.serialize(&address))
+                        .map(RemoteKey);
 
                     let writer_msg = WriterMessage::AddressResponse { callback, address };
 
@@ -521,14 +532,13 @@ impl Router {
                 }
                 RouterMessage::RemoveWriter(writer_key) => {
                     info!("remove writer {writer_key:?}");
-                    let Some(writer) = self.agents.remove(writer_key.into()) else { continue };
-                    if let Err(_e) = writer
-                        .tx
-                        .send_async(AnyMessage::Writer(WriterMessage::Shutdown))
-                        .await
-                    {
-                        self.remove_agent(writer_key.into()).await;
-                    }
+                    self.remove_agent(writer_key.into()).await;
+                    // if let Err(_e) = writer
+                    //     .tx
+                    //     .send_async(AnyMessage::Writer(WriterMessage::Shutdown))
+                    //     .await
+                    // {
+                    // }
                 }
             }
         }
