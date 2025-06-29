@@ -1,0 +1,74 @@
+use serde::Serialize;
+
+use crate::address::InternalAddress;
+use crate::bridge::{SessionMessage, WriterMessage};
+use crate::error::Result;
+use crate::serializer::Serializer;
+use crate::storage::Key;
+use crate::Agent;
+
+#[derive(Debug)]
+pub(crate) struct SessionAgent(Agent);
+
+impl SessionAgent {
+    pub(crate) fn new(agent: Agent) -> Self {
+        Self(agent)
+    }
+
+    pub(crate) fn key(&self) -> Key {
+        self.0.key().into()
+    }
+
+    pub(crate) async fn recv(&self) -> Result<SessionMessage> {
+        let msg = self.0.rx.recv_async().await?;
+        match msg {
+            super::AnyMessage::Session(value) => Ok(value),
+            // TODO what should be done here?
+            // The bridge should perhaps just ignore
+            // agent messages? Maybe a log entry?
+            super::AnyMessage::RemoteValue { .. } => {
+                unreachable!("bridge agent should never get a remote value")
+            }
+            super::AnyMessage::Value { value, .. } => {
+                Ok(*value
+                .downcast::<SessionMessage>()
+                .expect("only session messages can be sent to the writer"))
+            }
+            super::AnyMessage::LocalRequest { .. } => todo!("local request"),
+            super::AnyMessage::AgentRemoved(key) => {
+                tracing::info!("agent removed: {key:?}");
+                Ok(SessionMessage::AgentRemoved(key.into()))
+            },
+            super::AnyMessage::Writer(_) => unreachable!("writer messages should not be sent directly to the session"),
+        }
+    }
+
+    pub(crate) async fn send(&self, writer_recipient: Key, msg: WriterMessage) -> Result<()> {
+        let address = InternalAddress::Local(writer_recipient).into();
+        self.0.send_local(&address, msg).await
+    }
+
+    pub(crate) fn serializer(&self) -> Serializer {
+        self.0.serializer
+    }
+
+    pub(crate) fn serialize(&self, value: &impl Serialize) -> Result<Box<[u8]>> {
+        self.0.serializer.serialize(value)
+    }
+
+    pub(crate) async fn track(&self, key: Key) -> Result<()> {
+        let addr = InternalAddress::Local(key).into();
+        self.0.track(&addr).await
+    }
+
+    pub(crate) async fn remove_self(self) {
+        let _ = self.0.remove_self().await;
+    }
+
+    pub(crate) async fn remove_writer(&self, writer_key: Key) -> Result<()> {
+        tracing::warn!("find this: {writer_key:?}");
+        self.0
+            .remove_agent(InternalAddress::Local(writer_key).into())
+            .await
+    }
+}

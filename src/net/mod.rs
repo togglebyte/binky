@@ -3,36 +3,97 @@ use std::time::Duration;
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::sleep;
+use tracing::info;
 
-use crate::address::Address;
-use crate::agent::{AgentMessage, AnyMessage, BridgeAgent};
+pub use self::connection::{Connection, Stream, TcpConnection, UdsConnection};
+use crate::address::InternalAddress;
+use crate::agent::WriterAgent;
 use crate::bridge::message::ReaderMessage;
-use crate::bridge::WriterMessage;
+use crate::bridge::{SessionMessage, WriterMessage};
 use crate::error::{Error, Result};
 use crate::frame::{Frame, FrameOutput};
+use crate::router::session::SessionNegotiation;
 use crate::router::{RouterCtx, RouterMessage};
 use crate::serializer::Serializer;
-use crate::slab::BridgeKey;
+use crate::storage::{Key, KeyKind};
 use crate::value::Outgoing;
-use crate::{Agent, Stream};
+use crate::SessionKey;
 
-pub(crate) async fn connect<T: Serialize>(
-    stream: impl Stream,
+mod connection;
+
+// Client connect
+pub(crate) async fn connect<T: Serialize + Clone>(
+    mut connection: impl Connection,
     router_ctx: RouterCtx,
     heartbeat: Option<Duration>,
     address: Option<T>,
 ) -> Result<()> {
-    let (mut reader, writer) = stream.split();
-    let serializer: Serializer = reader.read_u8().await?.try_into()?;
+    let mut session_key = None::<SessionKey>;
 
-    let agent = router_ctx
-        .new_bridge_agent::<T>(address, None, serializer)
-        .await?;
+    loop {
+        let stream = match connection.connect().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("{e}");
+                connection.sleep().await?;
+                continue;
+            }
+        };
 
-    tokio::spawn(read(router_ctx.clone(), reader, heartbeat, agent.key()));
-    tokio::spawn(write(writer, agent));
+        let (mut reader, mut writer) = stream.split();
 
-    Ok(())
+        let serializer: Serializer = reader.read_u8().await?.try_into()?;
+
+        session_key = match session_key {
+            Some(session_key) => {
+                // Tell the receiving end that we have a session
+                writer
+                    .write_u8(SessionNegotiation::HasExistingSession as u8)
+                    .await?;
+                writer.write_u64(session_key.raw()).await?;
+
+                match SessionNegotiation::from(reader.read_u8().await?) {
+                    SessionNegotiation::ValidSession => Some(session_key),
+                    SessionNegotiation::InvalidSession => {
+                        Some(Key::new(reader.read_u64().await?, KeyKind::Session))
+                    }
+                    _ => todo!("return an error about invalid session"),
+                }
+            }
+            None => {
+                // Tell the receiving end that we don't have a session
+                writer
+                    .write_u8(SessionNegotiation::RequestNewSession as u8)
+                    .await?;
+                Some(Key::new(reader.read_u64().await?, KeyKind::Session))
+            }
+        };
+
+        let writer_agent = router_ctx
+            .new_writer_agent::<T>(address.clone(), None, serializer)
+            .await?;
+
+        tokio::spawn(read(
+            router_ctx.clone(),
+            reader,
+            heartbeat,
+            session_key.unwrap(), // TODO unwrap.. ewww
+            writer_agent.key(),
+        ));
+
+        match write(writer, writer_agent).await? {
+            WriterState::Reconnect => continue,
+            WriterState::Stop => break Ok(()),
+        }
+
+        // Wait between reconnects
+        connection.sleep().await?;
+    }
+}
+
+pub(crate) enum WriterState {
+    Reconnect,
+    Stop,
 }
 
 // -----------------------------------------------------------------------------
@@ -40,14 +101,14 @@ pub(crate) async fn connect<T: Serialize>(
 // -----------------------------------------------------------------------------
 struct Writer<W> {
     writer: W,
-    agent: BridgeAgent,
+    agent: WriterAgent,
 }
 
 impl<W> Writer<W>
 where
     W: AsyncWriteExt + Unpin,
 {
-    async fn run(mut self) -> Result<()> {
+    async fn run(mut self) -> Result<WriterState> {
         while let Ok(msg) = self.agent.recv().await {
             match msg {
                 WriterMessage::Value(value) => {
@@ -63,26 +124,31 @@ where
                     let msg = ReaderMessage::AddressResponse { callback, address };
                     self.write_msg(msg).await?;
                 }
+                WriterMessage::Shutdown => {
+                    tracing::info!("writer stopping");
+                    return Ok(WriterState::Stop);
+                }
             }
         }
 
-        Ok(())
+        Ok(WriterState::Reconnect)
     }
 
     async fn write_msg(&mut self, msg: ReaderMessage) -> Result<()> {
         // NOTE if the value can't be serialized there isn't much
         // that can be done here, so just dispose of it and return Ok (even though it's not)
+
         let Ok(raw_bytes) = self.agent.serialize(&msg) else { return Ok(()) };
         let payload = FrameOutput::frame_message(&raw_bytes);
-        self.writer.write(payload.as_ref()).await?;
+        self.writer.write_all(payload.as_ref()).await?;
         Ok(())
     }
 }
 
 pub(crate) async fn write(
-    mut writer: impl AsyncWriteExt + Unpin,
-    mut agent: BridgeAgent,
-) -> Result<()> {
+    writer: impl AsyncWriteExt + Unpin,
+    agent: WriterAgent,
+) -> Result<WriterState> {
     Writer { writer, agent }.run().await
 }
 
@@ -93,8 +159,11 @@ pub(crate) async fn read(
     router_ctx: RouterCtx,
     mut reader: impl AsyncReadExt + Unpin,
     heartbeat: Option<Duration>,
-    writer: BridgeKey,
+    session_key: Key,
+    writer_key: Key,
 ) {
+    tracing::info!("New reader. Writer: {writer_key:?} | Session: {session_key:?}");
+
     let mut frame = Frame::empty();
 
     let timeout = match heartbeat {
@@ -108,6 +177,7 @@ pub(crate) async fn read(
             _ = timeout => true,
             res = frame.read_async(&mut reader) => {
                 match res {
+                    Ok(0) => break 'read,
                     Ok(_byte_count) => 'msg: loop {
                         match frame.try_msg() {
                             Ok(Some(msg)) => {
@@ -116,34 +186,30 @@ pub(crate) async fn read(
                                         let Ok(msg) = router_ctx.deserialize::<ReaderMessage>(bytes) else { continue };
                                         match msg {
                                             ReaderMessage::Value(Outgoing { value, recipient, sender, reply_serializer }) => {
-                                                let sender = Address::Remote {
-                                                    local_bridge_key: writer,
+                                                let sender = InternalAddress::Remote {
+                                                    local_session_key: session_key,
                                                     remote_address: sender,
-                                                    remote_serializer: reply_serializer.try_into().unwrap(), // TODO: unrwap...
+                                                    remote_serializer: reply_serializer.try_into().expect("this is always created from a serializer"),
                                                 };
+
                                                 let msg = RouterMessage::incoming(value, sender, recipient);
                                                 router_ctx.send(msg).await;
                                             }
                                             ReaderMessage::AddressRequest { callback, address } => {
                                                 let address = router_ctx.lookup_address(address).await.ok();
-                                                let msg = RouterMessage::respond_resolve_remote(callback, address, writer);
+                                                let msg = RouterMessage::respond_resolve_remote(callback, address, session_key);
                                                 router_ctx.send(msg).await;
                                             }
                                             ReaderMessage::AddressResponse { callback, address } => {
                                                 let address = address.ok_or(Error::AddressNotFound);
                                                 // TODO
                                                 // What do we do if the callback fails?
-                                                // This can onlyh happen if the Receiver in the
-                                                // router has closed down, meaning the router
+                                                // This can only happen if the `Receiver` in the
+                                                // router is closed, meaning the router
                                                 // is inaccessible, meaning there is no reason to
                                                 // continue the program
                                                 router_ctx.callback(callback, address.into()).await;
                                             }
-                                            //RemoteMessage::AddressRequest { address, callback_id } => {
-                                            //    let msg = RouterMessage::something(address, callback_id, writer);
-                                            //    router_ctx.send(msg).await;
-                                            //}
-                                            //RemoteMessage::ResolveResponse { address, callback_id } => todo!(),
                                         }
                                     }
                                     FrameOutput::Heartbeat => continue,
@@ -158,7 +224,7 @@ pub(crate) async fn read(
                         }
                     },
                     Err(e) => {
-                        log::error!("{e}");
+                        tracing::error!("{e}");
                         break;
                     }
                 }
@@ -171,5 +237,6 @@ pub(crate) async fn read(
         }
     }
 
-    // panic!("tell the write half to go home");
+    info!("reader closed, removing writer");
+    router_ctx.remove_writer(writer_key).await;
 }

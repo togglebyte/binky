@@ -137,7 +137,7 @@ impl Header {
 #[derive(Debug)]
 pub(crate) struct Frame {
     buffer: Vec<u8>,
-    bytes_read: usize,
+    pub bytes_read: usize,
 }
 
 impl Frame {
@@ -165,14 +165,16 @@ impl Frame {
         &mut self,
         reader: &mut T,
     ) -> Result<usize> {
-        let slice = self.available_slice_mut();
+        let slice = self.available_slice_mut()?;
         let bytes_read = reader.read(slice).await?;
         self.inner_read(bytes_read)
     }
 
+    // TODO add this back in if we ever make this library sync
     /// Sync read
+    #[cfg(test)]
     pub(crate) fn read<T: std::io::Read>(&mut self, reader: &mut T) -> Result<usize> {
-        let slice = self.available_slice_mut();
+        let slice = self.available_slice_mut()?;
         let bytes_read = reader.read(slice)?;
         self.inner_read(bytes_read)
     }
@@ -189,18 +191,6 @@ impl Frame {
         }
 
         Ok(bytes_read)
-    }
-
-    fn extend(&mut self, bytes: &[u8]) -> usize {
-        // As long as there is room in the buffer, keep extending the slice
-        // until either:
-        // * All bytes are consumed
-        // * There is no more room in the buffer, and the buffer can not grow.
-        let slice = self.available_slice_mut();
-        let len = slice.len().min(bytes.len());
-        slice[..len].copy_from_slice(&bytes[..len]);
-        self.bytes_read += len;
-        len
     }
 
     /// Try to produce a message.
@@ -230,9 +220,11 @@ impl Frame {
 
         // This will happen if the message isn't fully read
         if range.end > self.bytes_read {
+            tracing::info!("expecting {}, have read {}", range.end, self.bytes_read);
             return Ok(None);
         }
 
+        tracing::info!("read the entire message: {}", self.bytes_read);
         let bytes = self.buffer[range.clone()].into();
 
         self.shift_down_to_next_message(range.end);
@@ -246,14 +238,28 @@ impl Frame {
         Ok(Some(FrameOutput::Bytes(bytes)))
     }
 
-    fn available_slice_mut(&mut self) -> &mut [u8] {
-        let slice = &mut self.buffer[self.bytes_read..];
-        if slice.is_empty() && self.buffer.capacity() < MAX_BUF_SIZE {
-            // Resize the buffer and initiliase it with zeroes
-            self.buffer.resize(self.buffer.len() + BUF_SIZE, 0);
+    fn available_slice_mut(&mut self) -> Result<&mut [u8]> {
+        // If the buffer has never been used, initialise it with zeros.
+        // Do this deferred initialisation so we don't allocate data 
+        // for frames that are never read into
+        if self.buffer.is_empty() {
+            self.buffer.resize(BUF_SIZE, 0);
         }
 
-        &mut self.buffer[self.bytes_read..]
+        let slice = &mut self.buffer[self.bytes_read..];
+        if slice.is_empty() && self.buffer.capacity() < MAX_BUF_SIZE {
+            // Resize the buffer and initialise it with zeroes
+            self.buffer.resize(self.buffer.len() + BUF_SIZE, 0);
+        }
+        
+        let slice = &mut self.buffer[self.bytes_read..];
+
+        // match slice.is_empty() {
+        //     true => Err(Error::NoSpaceLeftInBuffer),
+        //     false => Ok(slice)
+        // }
+        Ok(slice)
+        
     }
 
     fn range(&self, header: Header) -> Option<Range<usize>> {

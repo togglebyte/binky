@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::slab::RemoteKey;
+use crate::storage::{Key, RemoteKey};
 use crate::value::{Initial, Outgoing, RemoteVal};
 
 /// Message deserialized by the reading half of a socket
@@ -18,6 +18,7 @@ pub(crate) enum ReaderMessage {
 }
 
 /// Any message sent to the writing half of a socket
+#[derive(Debug)]
 pub(crate) enum WriterMessage {
     Value(RemoteVal<Initial>),
     AddressRequest {
@@ -28,4 +29,15 @@ pub(crate) enum WriterMessage {
         callback: u64,
         address: Option<RemoteKey>,
     },
+    Shutdown
+}
+
+#[derive(Debug)]
+pub(crate) enum SessionMessage {
+    // Message to forward to the associated `Writer`
+    Writer(WriterMessage),
+    AgentRemoved(Key),
+    WriterReturned(Key),
+    SessionPing,
+    CloseWriter,
 }

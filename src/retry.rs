@@ -31,9 +31,7 @@ impl Timeout {
     pub async fn sleep(&mut self) -> Result<()> {
         match &mut self.retries {
             RetryCount::Count(0) | RetryCount::Never => return Err(Error::NoRetry),
-            RetryCount::Count(count) => {
-                *count -= 1;
-            }
+            RetryCount::Count(count) => *count -= 1,
             RetryCount::Forever => {}
         }
 
@@ -72,6 +70,11 @@ impl Timeout {
     pub fn duration(mut self, duration: Duration) -> Self {
         self.sleep = Sleep::Duration(duration);
         self
+    }
+
+    /// The sleep duration in milliseconds
+    pub fn duration_ms(self, millis: u64) -> Self {
+        self.duration(Duration::from_millis(millis))
     }
 
     /// Linearly increment the duration by adding `add` after each sleep.
@@ -114,16 +117,10 @@ pub enum Sleep {
     Exponential(Duration),
 }
 
-pub struct RetryBuilder {
-    retries: RetryCount,
-    sleep: Sleep,
-    jitter: Option<Range<usize>>,
-}
-
 /// Create a retry strategy
 pub fn timeout() -> Timeout {
     Timeout {
-        retries: RetryCount::Never,
+        retries: RetryCount::Count(1),
         sleep: Sleep::NoSleep,
         jitter: None,
     }

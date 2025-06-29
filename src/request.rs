@@ -4,8 +4,7 @@ use flume::{Receiver, Sender};
 use serde::de::DeserializeOwned;
 
 use crate::error::{Error, Result};
-use crate::serializer::Serializer;
-use crate::slab::RemoteKey;
+use crate::storage::RemoteKey;
 use crate::value::AnyValue;
 
 #[derive(Debug)]
@@ -23,9 +22,6 @@ impl From<Result<RemoteKey>> for CallbackValue {
         Self::Resolve(value)
     }
 }
-
-#[derive(Debug)]
-pub struct Serializable((), Serializer);
 
 pub struct LocalResponse(Receiver<Result<AnyValue>>);
 

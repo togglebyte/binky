@@ -3,21 +3,21 @@ use std::any::Any;
 use flume::Receiver;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use tokio::io::AsyncReadExt;
 
 use super::{AgentMessage, AnyMessage};
-use crate::address::Address;
+use crate::address::InternalAddress;
 use crate::error::{Error, Result};
 use crate::retry::Timeout;
 use crate::router::{RouterCtx, RouterMessage};
 use crate::serializer::Serializer;
-use crate::slab::{AgentKey, BridgeKey};
-use crate::value::{AnyValue, Initial, RemoteVal};
-use crate::Stream;
+use crate::storage::{Key, KeyKind};
+use crate::value::{AnyValue, RemoteVal};
+use crate::{Address, Connection, Stream};
 
 /// Agent..
+#[derive(Debug)]
 pub struct Agent {
-    key: AgentKey,
+    key: Key,
     router_ctx: RouterCtx,
     pub(super) rx: Receiver<AnyMessage>,
     // This is the local serilizer that is used by the router
@@ -28,7 +28,7 @@ pub struct Agent {
 /// An agent
 impl Agent {
     pub(crate) fn new(
-        key: AgentKey,
+        key: Key,
         router_ctx: RouterCtx,
         rx: Receiver<AnyMessage>,
         serializer: Serializer,
@@ -43,11 +43,11 @@ impl Agent {
 
     /// Get the local address to this agent
     pub fn address(&self) -> Address {
-        Address::Local(self.key)
+        InternalAddress::Local(self.key).into()
     }
 
     /// Get the key for the agent
-    pub fn key(&self) -> AgentKey {
+    pub fn key(&self) -> Key {
         self.key
     }
 
@@ -70,16 +70,16 @@ impl Agent {
         value: U,
     ) -> Result<()> {
         match recipient {
-            Address::Local(agent_key) => {
+            Address(InternalAddress::Local(agent_key)) => {
                 let value: AnyValue = Box::new(value);
                 let message = RouterMessage::value(self.key, *agent_key, value);
                 self.router_ctx.send(message).await?;
             }
-            Address::Remote {
-                local_bridge_key,
+            Address(InternalAddress::Remote {
+                local_session_key: local_bridge_key,
                 remote_address: recipient,
                 remote_serializer,
-            } => {
+            }) => {
                 let payload = remote_serializer.serialize(&value)?;
                 let value = RemoteVal::new(payload, self.key, *local_bridge_key, recipient.clone());
                 let message = RouterMessage::remote_value(value);
@@ -95,14 +95,14 @@ impl Agent {
         recipient: &Address,
         value: U,
     ) -> Result<()> {
-        match recipient {
-            Address::Local(agent_key) => {
+        match recipient.inner() {
+            InternalAddress::Local(agent_key) => {
                 let value: AnyValue = Box::new(value);
                 let message = RouterMessage::value(self.key, *agent_key, value);
                 self.router_ctx.send_sync(message)?;
             }
-            Address::Remote {
-                local_bridge_key,
+            InternalAddress::Remote {
+                local_session_key: local_bridge_key,
                 remote_address: recipient,
                 remote_serializer,
             } => {
@@ -129,28 +129,35 @@ impl Agent {
     /// # }
     /// ```
     pub async fn send_local<U: Send + 'static>(&self, recipient: &Address, value: U) -> Result<()> {
-        match recipient {
-            Address::Local(agent_key) => {
+        match recipient.inner() {
+            InternalAddress::Local(agent_key) => {
                 let value: AnyValue = Box::new(value);
                 let message = RouterMessage::value(self.key, *agent_key, value);
                 self.router_ctx.send(message).await?;
             }
-            Address::Remote { .. } => return Err(Error::RemoteActionOnLocal),
+            InternalAddress::Remote { .. } => return Err(Error::RemoteActionOnLocal),
         }
         Ok(())
     }
 
     /// Track a local agent
     pub async fn track(&self, address: &Address) -> Result<()> {
-        match address {
-            Address::Local(key) => self.router_ctx.track(self.key(), *key).await,
-            Address::Remote { .. } => Err(Error::LocalOnly),
+        match address.inner() {
+            InternalAddress::Local(key) => self.router_ctx.track(self.key(), *key).await,
+            &InternalAddress::Remote {
+                local_session_key, ..
+            } => {
+                self.router_ctx
+                    .track(self.key(), local_session_key.into())
+                    .await
+            }
         }
     }
 
     /// Remove self
-    pub async fn remove_self(&self) -> Result<()> {
-        self.router_ctx.remove(self.key()).await
+    pub async fn remove_self(self) {
+        // There isn't much that can be done if this fails
+        let _ = self.router_ctx.remove(self.key()).await;
     }
 
     /// Receive a message that was sent to this agent's address.
@@ -175,25 +182,16 @@ impl Agent {
         Ok(msg)
     }
 
-    /// Receive a local message that was sent to this agent's address.
-    /// ```
-    /// # use binky::Agent;
-    /// # async fn run(mut agent: Agent) {
-    /// let msg = agent.recv::<()>().await;
-    /// # }
-    /// ```
-    pub async fn recv_local<T: Any>(&mut self) -> Result<AgentMessage<T>> {
-        let any_message = self.rx.recv_async().await?;
-        let msg = any_message.to_local_agent_message()?;
-        Ok(msg)
-    }
-
-    /// Make a request to another agent
+    /// Make a request to another local agent.
+    /// Since requests are blocking in nature they do not work 
+    /// over a bridge
     /// ```
     /// # use binky::Agent;
     /// # async fn async_run(mut agent: Agent) {
     /// # let address = agent.resolve(()).await.unwrap();
     /// let request = agent.request::<String>(&address, 123).await.unwrap();
+    /// println!("request is: {}", &*request);
+    /// request.reply(true).await
     /// # }
     /// ```
     pub async fn request<T: DeserializeOwned + Any>(
@@ -201,23 +199,23 @@ impl Agent {
         recipient: &Address,
         value: impl Send + 'static,
     ) -> Result<T> {
-        match recipient {
-            Address::Local(recipient) => {
+        match recipient.inner() {
+            InternalAddress::Local(recipient) => {
                 let value = Box::new(value);
                 let (response, msg) = RouterMessage::local_request(self.key, *recipient, value);
                 self.router_ctx.send(msg).await?;
                 let response = response.consume().await?;
                 response
                     .downcast::<T>()
-                    .map_err(|e| Error::InvalidValueType)
+                    .map_err(|_| Error::InvalidValueType)
                     .map(|val| *val)
             }
-            Address::Remote {
-                local_bridge_key,
+            InternalAddress::Remote {
+                local_session_key,
                 remote_address,
                 remote_serializer,
             } => {
-                panic!()
+                Err(Error::LocalOnly)
             }
         }
     }
@@ -235,7 +233,7 @@ impl Agent {
     pub async fn resolve(&self, address: impl Serialize) -> Result<Address> {
         let address = self.router_ctx.serialize(&address)?;
         let key = self.router_ctx.lookup_address(address).await?;
-        Ok(Address::Local(key))
+        Ok(InternalAddress::Local(key).into())
     }
 
     /// Resolve an address to a local agent with a retry
@@ -245,12 +243,13 @@ impl Agent {
         mut retry: Timeout,
     ) -> Result<Address> {
         let address = self.router_ctx.serialize(&address)?;
-        let key = loop {
+        let addr = loop {
             match self
                 .router_ctx
                 .lookup_address(address.clone())
                 .await
-                .map(Address::Local)
+                .map(InternalAddress::Local)
+                .map(Into::into)
             {
                 Ok(key) => break key,
                 Err(Error::AddressNotFound) => {
@@ -261,7 +260,7 @@ impl Agent {
             }
         };
 
-        Ok(key)
+        Ok(addr)
     }
 
     /// Resolve an address to a remote agent using a local bridge
@@ -274,31 +273,33 @@ impl Agent {
         bridge: Address,
         address: impl Serialize,
     ) -> Result<Address> {
-        let bridge = match bridge {
-            Address::Local(bridge) => bridge.into(),
-            Address::Remote { .. } => panic!("can not use a remote address as the bridge"),
+        let session: Key = match bridge.0 {
+            InternalAddress::Local(session) => session.into(),
+            InternalAddress::Remote { .. } => panic!("can not use a remote address as the bridge"),
         };
 
-        let (rx, msg) = RouterMessage::get_serializer(bridge);
+        let (rx, msg) = RouterMessage::get_serializer(session);
         self.router_ctx.send(msg).await?;
         let remote_serializer = rx.recv_async().await??;
 
         // Now that we have the serializer we can make the request:
         let address = remote_serializer.serialize(&address)?;
-        let (rx, msg) = RouterMessage::resolve_remote(self.key(), bridge, address);
+        let (rx, msg) = RouterMessage::resolve_remote(session, address);
 
         self.router_ctx.send(msg).await?;
         let remote_address = rx.recv_async().await??;
-        Ok(Address::Remote {
-            local_bridge_key: bridge,
+        Ok(InternalAddress::Remote {
+            local_session_key: session,
             remote_address,
             remote_serializer,
-        })
+        }
+        .into())
     }
 
     async fn new_agent(&self, address: impl Serialize, cap: Option<usize>) -> Result<Agent> {
         let address = self.router_ctx.serialize(&address)?;
-        let (rx, msg) = RouterMessage::new_agent(Some(address), cap, self.serializer);
+        let (rx, msg) =
+            RouterMessage::new_agent(Some(address), cap, self.serializer, KeyKind::Agent);
         self.router_ctx.send(msg).await?;
         Ok(rx.recv_async().await?)
     }
@@ -314,10 +315,52 @@ impl Agent {
     }
 
     /// Remove a local agent
-    pub async fn remove_agent(&self, key: AgentKey) -> Result<()> {
-        let msg = RouterMessage::remove_agent(key);
-        self.router_ctx.send(msg).await?;
-        Ok(())
+    pub async fn remove_agent(&self, addr: Address) -> Result<()> {
+        match addr.inner() {
+            InternalAddress::Local(key) => {
+                let msg = RouterMessage::remove_agent(*key);
+                self.router_ctx.send(msg).await?;
+                Ok(())
+            }
+            InternalAddress::Remote { .. } => Err(Error::LocalOnly),
+        }
+    }
+
+    /// Connect to a remote router.
+    ///
+    /// ```no_run
+    /// use binky::{Router, TcpStream};
+    /// use serde::{Deserialize, Serialize};
+    ///
+    /// #[derive(Clone, Serialize, Deserialize)]
+    /// enum Address {
+    ///     Connection,
+    /// }
+    ///
+    /// # async fn async_run() {
+    /// let mut router = Router::new();
+    /// let connection = binky::TcpConnection::new("127.0.0.1:8000", binky::timeout());
+    /// let agent = router.agent("I'm an agent!");
+    /// let session = agent.connect(connection, "some agent address");
+    /// router.run().await;
+    /// # }
+    /// ```
+    pub async fn connect(
+        &self,
+        connection: impl Connection,
+        bridge_address: impl Serialize + Send + Clone + 'static,
+    ) {
+        let heartbeat = None;
+        let handle = tokio::spawn(crate::bridge::connect(
+            connection,
+            self.router_ctx.clone(),
+            heartbeat,
+            Some(bridge_address),
+        ));
+    }
+
+    pub(crate) async fn cleanup_sessions(&self) -> Result<()> {
+        self.router_ctx.cleanup_sessions().await
     }
 }
 
