@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt::{self, Debug};
 use std::mem::swap;
 
@@ -40,11 +41,16 @@ impl Key {
         Self(index)
     }
 
+    pub const fn router() -> Self {
+        Self::new(u64::MAX, KeyKind::Router)
+    }
+
     pub const fn kind(&self) -> KeyKind {
         match (self.0 >> INDEX + GEN) as u8 {
             1 => KeyKind::Agent,
             2 => KeyKind::Writer,
             3 => KeyKind::Session,
+            4 => KeyKind::Router,
             _ => panic!("invalid key"),
         }
     }
@@ -98,6 +104,7 @@ impl Debug for Key {
             KeyKind::Agent => write!(f, "<A {} | {}>", self.index(), self.gen()),
             KeyKind::Writer => write!(f, "<W {} | {}>", self.index(), self.gen()),
             KeyKind::Session => write!(f, "<S {} | {}>", self.index(), self.gen()),
+            KeyKind::Router => write!(f, "<R>"),
         }
     }
 }
@@ -108,6 +115,7 @@ pub(crate) enum KeyKind {
     Agent = 1,
     Writer = 2,
     Session = 3,
+    Router = 4,
 }
 
 #[derive(Debug)]
@@ -130,6 +138,7 @@ impl<T> Entry<T> {
 pub(crate) struct Agents<T> {
     inner: Vec<Entry<T>>,
     next_key: Option<Key>,
+    pub(crate) sessions: HashSet<Key>,
 }
 
 impl<T> Agents<T> {
@@ -137,11 +146,12 @@ impl<T> Agents<T> {
         Self {
             inner: vec![],
             next_key: None,
+            sessions: HashSet::new(),
         }
     }
 
     pub(crate) fn insert(&mut self, value: T, kind: KeyKind) -> Key {
-        match self.next_key.take() {
+        let key = match self.next_key.take() {
             None => {
                 let key = Key::new(self.inner.len() as u64, kind);
                 self.inner.push(Entry::Occupied {
@@ -161,7 +171,13 @@ impl<T> Agents<T> {
                 key.set_kind(kind);
                 key
             }
+        };
+
+        if kind == KeyKind::Session {
+            self.sessions.insert(key);
         }
+
+        key
     }
 
     pub(crate) fn remove(&mut self, mut key: Key) -> Option<T> {
@@ -175,6 +191,11 @@ impl<T> Agents<T> {
         if gen != key.gen() {
             panic!("generation missmatch")
         }
+
+        if key.kind() == KeyKind::Session {
+            self.sessions.remove(&key);
+        }
+
         key.bump();
         self.next_key = Some(key);
         Some(value)

@@ -47,7 +47,7 @@ impl Agent {
     }
 
     /// Get the key for the agent
-    pub(crate) fn key(&self) -> Key {
+    pub fn key(&self) -> Key {
         self.key
     }
 
@@ -182,25 +182,16 @@ impl Agent {
         Ok(msg)
     }
 
-    /// Receive a local message that was sent to this agent's address.
-    /// ```
-    /// # use binky::Agent;
-    /// # async fn run(mut agent: Agent) {
-    /// let msg = agent.recv::<()>().await;
-    /// # }
-    /// ```
-    pub async fn recv_local<T: Any>(&mut self) -> Result<AgentMessage<T>> {
-        let any_message = self.rx.recv_async().await?;
-        let msg = any_message.to_local_agent_message()?;
-        Ok(msg)
-    }
-
-    /// Make a request to another agent
+    /// Make a request to another local agent.
+    /// Since requests are blocking in nature they do not work 
+    /// over a bridge
     /// ```
     /// # use binky::Agent;
     /// # async fn async_run(mut agent: Agent) {
     /// # let address = agent.resolve(()).await.unwrap();
     /// let request = agent.request::<String>(&address, 123).await.unwrap();
+    /// println!("request is: {}", &*request);
+    /// request.reply(true).await
     /// # }
     /// ```
     pub async fn request<T: DeserializeOwned + Any>(
@@ -219,7 +210,13 @@ impl Agent {
                     .map_err(|_| Error::InvalidValueType)
                     .map(|val| *val)
             }
-            InternalAddress::Remote { .. } => Err(Error::LocalOnly),
+            InternalAddress::Remote {
+                local_session_key,
+                remote_address,
+                remote_serializer,
+            } => {
+                Err(Error::LocalOnly)
+            }
         }
     }
 
@@ -330,7 +327,7 @@ impl Agent {
     }
 
     /// Connect to a remote router.
-    /// 
+    ///
     /// ```no_run
     /// use binky::{Router, TcpStream};
     /// use serde::{Deserialize, Serialize};
@@ -351,15 +348,19 @@ impl Agent {
     pub async fn connect(
         &self,
         connection: impl Connection,
-        address: impl Serialize + Send + Clone + 'static,
+        bridge_address: impl Serialize + Send + Clone + 'static,
     ) {
         let heartbeat = None;
         let handle = tokio::spawn(crate::bridge::connect(
             connection,
             self.router_ctx.clone(),
             heartbeat,
-            Some(address),
+            Some(bridge_address),
         ));
+    }
+
+    pub(crate) async fn cleanup_sessions(&self) -> Result<()> {
+        self.router_ctx.cleanup_sessions().await
     }
 }
 

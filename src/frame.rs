@@ -220,11 +220,11 @@ impl Frame {
 
         // This will happen if the message isn't fully read
         if range.end > self.bytes_read {
-            log::info!("expecting {}, have read {}", range.end, self.bytes_read);
+            tracing::info!("expecting {}, have read {}", range.end, self.bytes_read);
             return Ok(None);
         }
 
-        log::info!("read the entire message: {}", self.bytes_read);
+        tracing::info!("read the entire message: {}", self.bytes_read);
         let bytes = self.buffer[range.clone()].into();
 
         self.shift_down_to_next_message(range.end);

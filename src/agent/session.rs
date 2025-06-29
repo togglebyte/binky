@@ -1,5 +1,4 @@
 use serde::Serialize;
-use tracing::info;
 
 use crate::address::InternalAddress;
 use crate::bridge::{SessionMessage, WriterMessage};
@@ -20,14 +19,10 @@ impl SessionAgent {
         self.0.key().into()
     }
 
-    #[tracing::instrument]
     pub(crate) async fn recv(&self) -> Result<SessionMessage> {
         let msg = self.0.rx.recv_async().await?;
         match msg {
-            super::AnyMessage::Session(value) => {
-                info!("session message {value:?}");
-                Ok(value)
-            }
+            super::AnyMessage::Session(value) => Ok(value),
             // TODO what should be done here?
             // The bridge should perhaps just ignore
             // agent messages? Maybe a log entry?
@@ -35,14 +30,13 @@ impl SessionAgent {
                 unreachable!("bridge agent should never get a remote value")
             }
             super::AnyMessage::Value { value, .. } => {
-                info!("session message (downcast) {value:?}");
                 Ok(*value
                 .downcast::<SessionMessage>()
                 .expect("only session messages can be sent to the writer"))
             }
             super::AnyMessage::LocalRequest { .. } => todo!("local request"),
             super::AnyMessage::AgentRemoved(key) => {
-                info!("agent removed: {key:?}");
+                tracing::info!("agent removed: {key:?}");
                 Ok(SessionMessage::AgentRemoved(key.into()))
             },
             super::AnyMessage::Writer(_) => unreachable!("writer messages should not be sent directly to the session"),
@@ -72,6 +66,7 @@ impl SessionAgent {
     }
 
     pub(crate) async fn remove_writer(&self, writer_key: Key) -> Result<()> {
+        tracing::warn!("find this: {writer_key:?}");
         self.0
             .remove_agent(InternalAddress::Local(writer_key).into())
             .await

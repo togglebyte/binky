@@ -84,7 +84,6 @@ impl RouterCtx {
         cap: Option<usize>,
         serializer: Serializer,
     ) -> Result<SessionAgent> {
-        dbg!("new session agent");
         let agent = self
             .new_agent(address, cap, serializer, KeyKind::Session)
             .await?;
@@ -144,6 +143,12 @@ impl RouterCtx {
         self.tx.send_async(msg).await?;
         Ok(())
     }
+
+    pub(crate) async fn cleanup_sessions(&self) -> Result<()> {
+        let msg = RouterMessage::CleanupSessions;
+        self.tx.send_async(msg).await?;
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -170,6 +175,7 @@ pub struct Router {
     router_rx: Receiver<RouterMessage>,
     serializer: Serializer,
     callbacks: Slab<Callback>,
+    ping_key: Option<Key>,
 }
 
 impl Router {
@@ -180,16 +186,52 @@ impl Router {
         }
     }
 
+    async fn stop_ping_session(&self) {
+        let key = self.ping_key.expect("this should probably not be here");
+        let Some(agent) = self.agents.get(key) else {
+            return;
+        };
+
+        agent
+            .tx
+            .send_async(AnyMessage::Value {
+                value: Box::new(session::PingControl::Stop),
+                sender: InternalAddress::Local(Key::router()),
+            })
+            .await;
+    }
+
+    async fn start_ping_session(&self) {
+        let key = self.ping_key.expect("this should probably not be here");
+        let Some(agent) = self.agents.get(key) else {
+            return;
+        };
+
+        let sender = InternalAddress::Local(Key::router());
+        agent
+            .tx
+            .send_async(AnyMessage::Value {
+                value: Box::new(session::PingControl::Start),
+                sender: InternalAddress::Local(Key::router()),
+            })
+            .await;
+    }
+
     async fn remove_agent(&mut self, key: Key) {
-        eprintln!("removing: {key:?}");
+        tracing::info!("removing agent: {key:?}");
         let Some(agent) = self.agents.remove(key) else { return };
+
+        // Stop session ping
+        if key.kind() == KeyKind::Session && self.agents.sessions.is_empty() {
+            self.stop_ping_session().await;
+        }
 
         if let Some(bytes) = agent.address {
             self.addresses.remove(&bytes);
         }
 
         if let Some(tracked) = self.tracked_by.remove(&key) {
-            eprintln!("notify: {tracked:?}");
+            tracing::info!("notify: {tracked:?}");
             for agent in tracked {
                 let Some(agent) = self.agents.get(agent.into()) else { continue };
                 let _ = agent.tx.send_async(AnyMessage::AgentRemoved(key)).await;
@@ -213,6 +255,7 @@ impl Router {
             router_rx,
             serializer: Serializer::Json,
             callbacks: Slab::new(),
+            ping_key: None,
         }
     }
 
@@ -327,8 +370,11 @@ impl Router {
     /// handle.await.unwrap();
     /// # }
     /// ```
-    // #[tracing::instrument]
     pub async fn run(mut self) -> Self {
+        let ping_agent = self.agent(session::SessionPingAddress);
+        self.ping_key = Some(ping_agent.key());
+        tokio::spawn(session::session_ping(ping_agent));
+
         while let Ok(msg) = self.router_rx.recv_async().await {
             match msg {
                 RouterMessage::Value {
@@ -336,12 +382,12 @@ impl Router {
                     value,
                     sender,
                 } => {
-                    let Some(agent) = self.agents.get(recipient.into()) else {
+                    let Some(agent) = self.agents.get(recipient) else {
                         continue;
                     };
                     // If this fails it means the channel was closed and
                     // the only thing left to do here is to remove the sending half of the channel
-                    if let Err(_) = agent
+                    if let Err(e) = agent
                         .tx
                         .send_async(AnyMessage::Value {
                             value,
@@ -349,6 +395,7 @@ impl Router {
                         })
                         .await
                     {
+                        tracing::error!("message fail to deliver: {e}");
                         self.remove_agent(recipient).await;
                     }
                 }
@@ -360,12 +407,16 @@ impl Router {
                     };
 
                     info!("sending outgoing remote value");
-                    session
+                    if let Err(e) = session
                         .tx
                         .send_async(AnyMessage::Session(SessionMessage::Writer(
                             WriterMessage::Value(value),
                         )))
-                        .await;
+                        .await
+                    {
+                        tracing::error!("message fail to deliver to remote agent: {e}");
+                        // self.remove_agent(_).await;
+                    }
                 }
                 RouterMessage::IncomingRemoteValue(value) => {
                     info!("incoming remote value");
@@ -442,11 +493,12 @@ impl Router {
 
                     let writer_msg = WriterMessage::AddressRequest { callback, address };
 
-                    if let Err(_e) = session_agent
+                    if let Err(e) = session_agent
                         .tx
                         .send_async(AnyMessage::Session(SessionMessage::Writer(writer_msg)))
                         .await
                     {
+                        tracing::error!("failed to resolve remote: {e}");
                         self.remove_agent(session.into()).await;
                     }
                 }
@@ -479,6 +531,11 @@ impl Router {
                     serializer,
                     kind,
                 } => {
+                    if kind == KeyKind::Session && self.agents.sessions.is_empty() {
+                        // Start session ping
+                        self.start_ping_session().await;
+                    }
+
                     let agent = self.new_agent(address, cap, serializer, kind);
                     let _ = reply.send_async(agent).await;
                 }
@@ -509,10 +566,10 @@ impl Router {
                     let _ = tx.send_async(self.agents.get(key.into()).is_some()).await;
                 }
                 RouterMessage::CleanupSessions => {
-                    info!("cleanup sessions");
                     let mut removed_agents = vec![];
-                    for key in self.sessions.keys().copied() {
-                        match self.agents.get(key.into()) {
+
+                    for key in self.agents.sessions.iter().copied() {
+                        match self.agents.get(key) {
                             Some(agent) => {
                                 if let Err(_e) = agent
                                     .tx
@@ -531,14 +588,20 @@ impl Router {
                     }
                 }
                 RouterMessage::RemoveWriter(writer_key) => {
-                    info!("remove writer {writer_key:?}");
-                    self.remove_agent(writer_key.into()).await;
-                    // if let Err(_e) = writer
-                    //     .tx
-                    //     .send_async(AnyMessage::Writer(WriterMessage::Shutdown))
-                    //     .await
-                    // {
-                    // }
+                    info!("removing writer {writer_key:?}");
+
+                    if let Some(agent) = self.agents.get(writer_key) {
+                        agent
+                            .tx
+                            .send_async(AnyMessage::Session(SessionMessage::Writer(
+                                WriterMessage::Shutdown,
+                            )))
+                            .await;
+                        info!("sent removal to writer {writer_key:?}");
+                    }
+
+                    self.remove_agent(writer_key).await;
+                    info!("removed writer {writer_key:?}");
                 }
             }
         }

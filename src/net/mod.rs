@@ -34,7 +34,7 @@ pub(crate) async fn connect<T: Serialize + Clone>(
         let stream = match connection.connect().await {
             Ok(s) => s,
             Err(e) => {
-                log::error!("{e}");
+                tracing::error!("{e}");
                 connection.sleep().await?;
                 continue;
             }
@@ -124,7 +124,10 @@ where
                     let msg = ReaderMessage::AddressResponse { callback, address };
                     self.write_msg(msg).await?;
                 }
-                WriterMessage::Shutdown => return Ok(WriterState::Stop),
+                WriterMessage::Shutdown => {
+                    tracing::info!("writer stopping");
+                    return Ok(WriterState::Stop);
+                }
             }
         }
 
@@ -159,6 +162,8 @@ pub(crate) async fn read(
     session_key: Key,
     writer_key: Key,
 ) {
+    tracing::info!("New reader. Writer: {writer_key:?} | Session: {session_key:?}");
+
     let mut frame = Frame::empty();
 
     let timeout = match heartbeat {
@@ -171,8 +176,6 @@ pub(crate) async fn read(
         let should_break = tokio::select! {
             _ = timeout => true,
             res = frame.read_async(&mut reader) => {
-                log::info!("{res:?}");
-
                 match res {
                     Ok(0) => break 'read,
                     Ok(_byte_count) => 'msg: loop {
@@ -221,8 +224,7 @@ pub(crate) async fn read(
                         }
                     },
                     Err(e) => {
-                        panic!("{e:?}");
-                        log::error!("{e}");
+                        tracing::error!("{e}");
                         break;
                     }
                 }

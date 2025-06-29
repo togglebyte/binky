@@ -61,6 +61,27 @@ impl<A: ToSocketAddrs + Clone + Send + 'static> Connection for TcpConnection<A> 
 /// Connection handling for a unix domain socket.
 pub struct UdsConnection(PathBuf, Timeout);
 
+impl UdsConnection {
+    /// Create a new instance of a connection over a unix domain socket
+    pub fn new(addr: PathBuf, timeout: Timeout) -> Self {
+        Self(addr, timeout)
+    }
+}
+
+impl Connection for UdsConnection {
+    fn connect(
+        &mut self,
+    ) -> impl Future<Output = Result<impl Stream + Send + 'static>> + Send + 'static {
+        let addr = self.0.clone();
+        async { Ok(UnixStream::connect(addr).await?) }
+    }
+
+    async fn sleep(&mut self) -> Result<()> {
+        self.1.sleep().await
+    }
+}
+
+
 /// Implement the `Stream` trait for any type that should be used
 /// with the `Agent::connect` function to pass data to other `Router`s.
 pub trait Stream: Send + 'static {

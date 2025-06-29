@@ -31,6 +31,15 @@ impl Address {
     pub(crate) fn inner(&self) -> &InternalAddress {
         &self.0
     }
+
+    /// Get the key associated with the address, regardless if it's 
+    /// a local or remote address.
+    pub fn key(&self) -> Key {
+        match &self.0 {
+            InternalAddress::Local(key) => *key,
+            InternalAddress::Remote { local_session_key, remote_address, remote_serializer } => *local_session_key,
+        }
+    }
 }
 
 impl From<InternalAddress> for Address {

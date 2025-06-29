@@ -20,7 +20,6 @@ impl WriterAgent {
         self.0.key()
     }
 
-    #[tracing::instrument]
     pub(crate) async fn recv(&self) -> Result<WriterMessage> {
         let msg = self.0.rx.recv_async().await?;
         match msg {

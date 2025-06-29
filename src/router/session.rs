@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::agent::{SessionAgent, WriterAgent};
@@ -7,6 +8,7 @@ use crate::bridge::{SessionMessage, WriterMessage};
 use crate::error::Result;
 use crate::queue::Queue;
 use crate::storage::Key;
+use crate::{Address, Agent};
 
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, Default)]
@@ -78,12 +80,7 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    pub(crate) fn new(
-        expiration: Expiration,
-        agent: SessionAgent,
-        writer_key: Key,
-        cap: usize,
-    ) -> Self {
+    pub(crate) fn new(expiration: Expiration, agent: SessionAgent, writer_key: Key, cap: usize) -> Self {
         Self {
             expiration,
             agent,
@@ -97,24 +94,33 @@ impl Session {
         self.backlog.push(msg);
     }
 
-    #[tracing::instrument]
     pub(crate) async fn run(mut self) -> Result<()> {
-        tracing::info!("running session");
+        info!(
+            "running session on {:?} -> writer {:?}",
+            self.agent.key(),
+            self.writer_key
+        );
         while let Ok(msg) = self.agent.recv().await {
             match msg {
                 SessionMessage::Writer(writer_msg) => match self.state {
                     State::Write => {
-                        info!("session message received");
+                        info!(
+                            "session message received on {:?} -> writer {:?}",
+                            self.agent.key(),
+                            self.writer_key
+                        );
                         self.agent.send(self.writer_key, writer_msg).await?
                     }
                     State::Log => drop(self.backlog.push(writer_msg)),
                 },
                 SessionMessage::AgentRemoved(key) if self.writer_key == key => {
+                    tracing::info!("session is awaiting reconnect to {:?}", self.agent.key());
                     self.state = State::Log;
                     self.expiration.renew();
                 }
                 SessionMessage::AgentRemoved(_) => continue,
                 SessionMessage::WriterReturned(new_key) => {
+                    tracing::info!("session {:?} reactivated with {new_key:?}", self.agent.key());
                     self.state = State::Write;
                     self.writer_key = new_key;
                     while let Some(msg) = self.backlog.pop() {
@@ -122,7 +128,7 @@ impl Session {
                     }
                 }
                 SessionMessage::CloseWriter => {
-                    eprintln!("here we close the writer");
+                    tracing::warn!("=============  here we close the writer");
                     self.agent.remove_writer(self.writer_key).await?;
                 }
                 SessionMessage::SessionPing => {
@@ -135,6 +141,7 @@ impl Session {
                     }
 
                     if self.expiration.has_expired() {
+                        tracing::info!("removing session {:?}", self.agent.key());
                         self.agent.remove_self().await;
                         break;
                     }
@@ -150,6 +157,59 @@ impl Session {
     }
 }
 
+#[derive(Debug, Copy, Clone, Serialize)]
+pub(super) struct SessionPingAddress;
+
+#[derive(Debug, Copy, Clone, Serialize)]
+pub(super) struct PingLoop;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) enum PingControl {
+    Stop,
+    Start,
+    Tick,
+}
+
+pub(super) async fn session_ping(mut agent: Agent) -> Result<()> {
+    let mut ticker_address = run_ticker(&agent).await?;
+
+    while let Ok(msg) = agent.recv::<PingControl>().await {
+        match msg {
+            crate::AgentMessage::Value { value, sender } => match value {
+                PingControl::Stop => {
+                    agent.remove_agent(ticker_address.clone()).await;
+                }
+                PingControl::Start => {
+                    ticker_address = run_ticker(&agent).await?;
+                }
+                PingControl::Tick => agent.cleanup_sessions().await?,
+            },
+            crate::AgentMessage::Request { request, sender } => todo!(),
+            crate::AgentMessage::AgentRemoved(address) => todo!(),
+            crate::AgentMessage::Disconnected => todo!(),
+            crate::AgentMessage::Connected => todo!(),
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_ticker(agent: &Agent) -> Result<Address> {
+    let ticker = agent.agent(PingLoop).await?;
+    let ticker_address = ticker.address();
+    let address = agent.address();
+
+    tokio::spawn(async move {
+        let mut timer = crate::timeout().forever().duration(Duration::from_secs(60 * 5));
+        loop {
+            timer.sleep().await;
+            ticker.send(&address, PingControl::Tick).await;
+        }
+    });
+
+    Ok(ticker_address)
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -163,15 +223,9 @@ mod test {
         tokio::spawn(router.run());
         let serializer = Serializer::Json;
 
-        let session_agent = router_ctx
-            .new_session_agent("session", None, serializer)
-            .await
-            .unwrap();
+        let session_agent = router_ctx.new_session_agent("session", None, serializer).await.unwrap();
 
-        let writer_agent = router_ctx
-            .new_writer_agent("writer", None, serializer)
-            .await
-            .unwrap();
+        let writer_agent = router_ctx.new_writer_agent("writer", None, serializer).await.unwrap();
 
         let bridge_key = writer_agent.key();
 

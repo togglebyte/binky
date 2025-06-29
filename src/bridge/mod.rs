@@ -38,6 +38,7 @@ where
             .await?;
 
         // ... track the writer agent
+        tracing::info!("session {:?} is tracking {writer_agent_key:?}", session_agent.key());
         session_agent.track(writer_agent_key).await?;
 
         // ... spawn a new session

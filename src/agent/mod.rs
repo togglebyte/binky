@@ -85,32 +85,6 @@ impl AnyMessage {
             }
         }
     }
-
-    fn to_local_agent_message<T: 'static>(self) -> Result<AgentMessage<T>> {
-        match self {
-            AnyMessage::Value { value, sender } => match value.downcast::<T>() {
-                Ok(val) => Ok(AgentMessage::Value {
-                    value: *val,
-                    sender: sender.into(),
-                }),
-                Err(_) => Err(Error::InvalidValueType),
-            },
-            AnyMessage::RemoteValue { .. } => Err(Error::RemoteActionOnLocal),
-            AnyMessage::LocalRequest { request, sender } => Ok(AgentMessage::Request {
-                request,
-                sender: sender.into(),
-            }),
-            AnyMessage::AgentRemoved(key) => Ok(AgentMessage::AgentRemoved(
-                InternalAddress::Local(key).into(),
-            )),
-            AnyMessage::Session(_) => {
-                unreachable!("this should be handled directly by the session")
-            }
-            AnyMessage::Writer(_) => {
-                unreachable!("this should be handled directly by the writer")
-            }
-        }
-    }
 }
 
 /// A message received by an agent.
@@ -142,7 +116,8 @@ pub enum AgentMessage<T> {
         /// The sender of the value
         sender: Address,
     },
-    /// A request that can be replied to
+    /// A local request that can be replied to.
+    /// This does not work across the network
     Request {
         /// The request
         request: Request<Pending>,
